@@ -1,223 +1,103 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
-import json
 import secrets
-import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Optional
 
-from fastapi import (
-    Cookie,
-    FastAPI,
-    File,
-    HTTPException,
-    UploadFile,
-)
+from fastapi import Cookie, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from .agent import Agent
-from .approval import ApprovalManager
-from .browser import BrowserManager
-from .code_analyzer import CodeAnalyzer
-from .config import get_settings
-from .connectivity import ConnectivityMonitor
-from .database import Database
-from .models import EventType, WorkStatus
-from .notifications import NotificationManager
-from .security import PasswordHasher, SecretBox
-from .task_manager import TaskManager
+from app.agent import Agent
+from app.approval import ApprovalManager
+from app.browser import BrowserManager
+from app.code_analyzer import CodeAnalyzer
+from app.config import get_settings
+from app.connectivity import ConnectivityMonitor
+from app.database import Database
+from app.models import ApprovalAction, WorkStatus, WorkflowType
+from app.notifications import NotificationManager
+from app.security import PasswordHasher, SecretBox
+from app.task_manager import TaskManager
 
 
 settings = get_settings()
+database = Database(settings.database_path)
 
-database = Database(
-    settings.database_path
-)
-
-agent = Agent(
-    settings=settings,
-    database=database,
-)
-
-browser = BrowserManager(
-    settings=settings,
-    database=database,
-)
-
-notifications = NotificationManager(
-    settings=settings,
-    database=database,
-)
+agent = Agent(database)
+browser = BrowserManager(database)
+notifications = NotificationManager(database)
+approvals = ApprovalManager(database)
+code_analyzer = CodeAnalyzer()
+secret_box = SecretBox(settings.encryption_key)
 
 task_manager = TaskManager(
     database=database,
     agent=agent,
     browser=browser,
     notifications=notifications,
+    approvals=approvals,
 )
 
-approvals = ApprovalManager(
-    database
-)
-
-code_analyzer = CodeAnalyzer()
-
-secret_box = SecretBox(
-    settings.encryption_key
-)
-
-connectivity = ConnectivityMonitor(
-    database=database,
-)
-
+connectivity = ConnectivityMonitor(database)
 
 app = FastAPI(
     title=settings.app_name,
-    version="2.0.0",
+    version="0.2.0",
 )
 
+frontend_dir = Path("frontend")
+static_dir = frontend_dir / "static"
 
-# ============================================================
-# Runtime state
-# ============================================================
+if static_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+
+# ---------------------------------------------------------------------
+# Session handling
+# ---------------------------------------------------------------------
 
 _active_sessions: set[str] = set()
 
-_connectivity_task: asyncio.Task | None = None
 
+def _verify_admin_password(password: str) -> bool:
+    """
+    Supports the current local setup where ADMIN_PASSWORD may be plain text,
+    while also supporting the secure PBKDF2 format produced by PasswordHasher.
+    """
 
-# ============================================================
-# Pydantic models
-# ============================================================
+    configured = settings.admin_password or ""
 
-class LoginRequest(BaseModel):
-    password: str = Field(
-        min_length=1,
-        max_length=256,
-    )
-
-
-class ChatRequest(BaseModel):
-    message: str = Field(
-        min_length=1,
-        max_length=20_000,
-    )
-
-    workflow_type: str = "assistant"
-
-    project_id: int | None = None
-
-
-class ProjectRequest(BaseModel):
-    name: str = Field(
-        min_length=1,
-        max_length=200,
-    )
-
-    workflow_type: str = Field(
-        min_length=1,
-        max_length=100,
-    )
-
-    description: str = Field(
-        default="",
-        max_length=5_000,
-    )
-
-
-class CardActionRequest(BaseModel):
-    action: str = Field(
-        min_length=1,
-        max_length=30,
-    )
-
-
-class BrowserOpenRequest(BaseModel):
-    project_id: int
-
-    site_name: str = Field(
-        min_length=1,
-        max_length=100,
-    )
-
-    url: str = Field(
-        min_length=8,
-        max_length=2_000,
-    )
-
-
-class BrowserNavigateRequest(BaseModel):
-    project_id: int
-
-    url: str = Field(
-        min_length=8,
-        max_length=2_000,
-    )
-
-
-class SecretRequest(BaseModel):
-    name: str = Field(
-        min_length=1,
-        max_length=100,
-    )
-
-    value: str = Field(
-        min_length=1,
-        max_length=50_000,
-    )
-
-
-class CodeAnalysisRequest(BaseModel):
-    code: str = Field(
-        min_length=1,
-        max_length=100_000,
-    )
-
-
-# ============================================================
-# Authentication helpers
-# ============================================================
-
-def create_session() -> str:
-    token = secrets.token_urlsafe(48)
-
-    _active_sessions.add(token)
-
-    return token
-
-
-def is_authenticated(
-    session: str | None,
-) -> bool:
-
-    if not session:
+    if not configured:
         return False
 
-    return session in _active_sessions
+    if configured.startswith("pbkdf2_sha256$"):
+        return PasswordHasher.verify_password(password, configured)
+
+    return secrets.compare_digest(password, configured)
 
 
-def require_auth(
-    session: str | None,
-) -> None:
-
-    if not is_authenticated(session):
+def _require_session(session: Optional[str]) -> None:
+    if not session or session not in _active_sessions:
         raise HTTPException(
             status_code=401,
-            detail="Authentication required.",
+            detail="جلسة غير صالحة أو منتهية",
         )
 
 
-# ============================================================
+def _cookie_secure() -> bool:
+    return settings.app_env.lower() == "production"
+
+
+# ---------------------------------------------------------------------
 # Startup / shutdown
-# ============================================================
+# ---------------------------------------------------------------------
 
 @app.on_event("startup")
-async def startup_event() -> None:
-    global _connectivity_task
+async def startup() -> None:
+    database.initialize()
 
     await browser.start()
 
@@ -227,245 +107,182 @@ async def startup_event() -> None:
     async def on_online() -> None:
         await notifications.restored()
 
+        # Resume only cards that were explicitly paused by connectivity.
         database.execute_script(
             """
             UPDATE work_cards
-            SET status = 'queued',
-                updated_at = CURRENT_TIMESTAMP
+            SET status = 'queued'
+            WHERE status = 'paused'
+              AND error_message = 'connection_lost'
+            """
+        )
+
+        database.execute_script(
+            """
+            UPDATE projects
+            SET status = 'queued'
             WHERE status = 'paused'
             """
         )
 
-    connectivity.set_callbacks(
-        on_offline=on_offline,
-        on_online=on_online,
-    )
+    connectivity.on_offline = on_offline
+    connectivity.on_online = on_online
 
-    _connectivity_task = asyncio.create_task(
-        connectivity.run()
-    )
+    await connectivity.start()
 
 
 @app.on_event("shutdown")
-async def shutdown_event() -> None:
-    global _connectivity_task
-
-    connectivity.stop()
-
-    if _connectivity_task:
-        _connectivity_task.cancel()
-
-        try:
-            await _connectivity_task
-        except asyncio.CancelledError:
-            pass
-
+async def shutdown() -> None:
+    await connectivity.stop()
     await browser.stop()
 
 
-# ============================================================
-# Static frontend
-# ============================================================
-
-frontend_dir = (
-    Path(__file__).resolve().parent.parent
-    / "frontend"
-)
-
-if frontend_dir.exists():
-
-    app.mount(
-        "/static",
-        StaticFiles(
-            directory=str(
-                frontend_dir / "static"
-            ),
-        ),
-        name="static",
-    )
-
+# ---------------------------------------------------------------------
+# Public pages
+# ---------------------------------------------------------------------
 
 @app.get("/")
-async def root() -> FileResponse:
-
-    index_file = frontend_dir / "login.html"
-
-    if not index_file.exists():
-        raise HTTPException(
-            status_code=404,
-            detail="Frontend not found.",
-        )
-
-    return FileResponse(
-        str(index_file)
-    )
+async def login_page():
+    return FileResponse(frontend_dir / "login.html")
 
 
 @app.get("/dashboard")
-async def dashboard(
-    session: str | None = Cookie(
-        default=None
-    ),
-) -> FileResponse:
+async def dashboard_page(session: Optional[str] = Cookie(default=None)):
+    _require_session(session)
+    return FileResponse(frontend_dir / "index.html")
 
-    require_auth(session)
-
-    index_file = frontend_dir / "index.html"
-
-    if not index_file.exists():
-        raise HTTPException(
-            status_code=404,
-            detail="Dashboard not found.",
-        )
-
-    return FileResponse(
-        str(index_file)
-    )
-
-
-# ============================================================
-# Health
-# ============================================================
 
 @app.get("/health")
-async def health() -> dict[str, Any]:
-
+async def health():
     return {
-        "status": "active",
-        "system": settings.app_name,
-        "version": "2.0.0",
-        "internet": connectivity.online,
-        "browser": browser.browser is not None,
+        "status": "ok",
+        "app": settings.app_name,
+        "environment": settings.app_env,
     }
 
 
-# ============================================================
+# ---------------------------------------------------------------------
 # Authentication
-# ============================================================
+# ---------------------------------------------------------------------
+
+class LoginRequest(BaseModel):
+    password: str
+
 
 @app.post("/api/login")
-async def login(
-    request: LoginRequest,
-) -> dict[str, Any]:
-
-    if not PasswordHasher.verify_password(
-        request.password,
-        settings.admin_password,
-    ):
+async def login(payload: LoginRequest, response: Response):
+    if not _verify_admin_password(payload.password):
         raise HTTPException(
             status_code=401,
-            detail="كلمة المرور غير صحيحة.",
+            detail="كلمة المرور غير صحيحة",
         )
 
-    token = create_session()
+    token = secrets.token_urlsafe(48)
+    _active_sessions.add(token)
+
+    response.set_cookie(
+        key="session",
+        value=token,
+        httponly=True,
+        secure=_cookie_secure(),
+        samesite="lax",
+        max_age=60 * 60 * 24,
+        path="/",
+    )
 
     return {
         "success": True,
-        "session": token,
+        "message": "تم تسجيل الدخول",
     }
 
 
 @app.post("/api/logout")
 async def logout(
-    session: str | None = Cookie(
-        default=None
-    ),
-) -> dict[str, Any]:
-
+    response: Response,
+    session: Optional[str] = Cookie(default=None),
+):
     if session:
         _active_sessions.discard(session)
 
-    return {
-        "success": True
-    }
+    response.delete_cookie(
+        key="session",
+        path="/",
+    )
+
+    return {"success": True}
 
 
-# ============================================================
-# Dashboard data
-# ============================================================
-
-@app.get("/api/dashboard")
-async def dashboard_data(
-    session: str | None = Cookie(
-        default=None
-    ),
-) -> dict[str, Any]:
-
-    require_auth(session)
-
-    return {
-        "projects": database.list_projects(),
-        "work_cards": database.list_work_cards(),
-        "events": database.list_events(
-            limit=100
-        ),
-        "internet": connectivity.online,
-    }
-
-
-# ============================================================
+# ---------------------------------------------------------------------
 # Chat
-# ============================================================
+# ---------------------------------------------------------------------
+
+class ChatRequest(BaseModel):
+    message: str
+    project_id: Optional[int] = None
+    workflow_type: WorkflowType = WorkflowType.ASSISTANT
+
 
 @app.post("/api/chat")
 async def chat(
-    request: ChatRequest,
-    session: str | None = Cookie(
-        default=None
-    ),
-) -> dict[str, Any]:
+    payload: ChatRequest,
+    session: Optional[str] = Cookie(default=None),
+):
+    _require_session(session)
 
-    require_auth(session)
+    message = payload.message.strip()
 
-    result = await task_manager.create_task_from_chat(
-        message=request.message,
-        workflow_type=request.workflow_type,
-        project_id=request.project_id,
+    if not message:
+        raise HTTPException(
+            status_code=400,
+            detail="الرسالة فارغة",
+        )
+
+    return await agent.chat(
+        message=message,
+        project_id=payload.project_id,
+        workflow_type=payload.workflow_type,
     )
 
-    return result
 
-
-# ============================================================
+# ---------------------------------------------------------------------
 # Projects
-# ============================================================
+# ---------------------------------------------------------------------
+
+class ProjectCreateRequest(BaseModel):
+    name: str
+    description: str = ""
+    workflow_type: WorkflowType = WorkflowType.ASSISTANT
+
 
 @app.get("/api/projects")
 async def list_projects(
-    session: str | None = Cookie(
-        default=None
-    ),
-) -> dict[str, Any]:
-
-    require_auth(session)
-
+    session: Optional[str] = Cookie(default=None),
+):
+    _require_session(session)
     return {
-        "projects": database.list_projects()
+        "projects": database.list_projects(),
     }
 
 
 @app.post("/api/projects")
 async def create_project(
-    request: ProjectRequest,
-    session: str | None = Cookie(
-        default=None
-    ),
-) -> dict[str, Any]:
+    payload: ProjectCreateRequest,
+    session: Optional[str] = Cookie(default=None),
+):
+    _require_session(session)
 
-    require_auth(session)
+    name = payload.name.strip()
+
+    if not name:
+        raise HTTPException(
+            status_code=400,
+            detail="اسم المشروع مطلوب",
+        )
 
     project_id = database.create_project(
-        name=request.name,
-        workflow_type=request.workflow_type,
-        description=request.description,
-    )
-
-    database.add_event(
-        event_type=EventType.INFO.value,
-        message=(
-            f"Project #{project_id} created."
-        ),
-        project_id=project_id,
+        name=name,
+        description=payload.description.strip(),
+        workflow_type=payload.workflow_type.value,
     )
 
     return {
@@ -477,531 +294,368 @@ async def create_project(
 @app.get("/api/projects/{project_id}")
 async def get_project(
     project_id: int,
-    session: str | None = Cookie(
-        default=None
-    ),
-) -> dict[str, Any]:
+    session: Optional[str] = Cookie(default=None),
+):
+    _require_session(session)
 
-    require_auth(session)
-
-    project = database.get_project(
-        project_id
-    )
+    project = database.get_project(project_id)
 
     if not project:
         raise HTTPException(
             status_code=404,
-            detail="المشروع غير موجود.",
+            detail="المشروع غير موجود",
         )
 
-    return {
-        "project": project,
-        "messages": database.get_messages(
-            project_id
-        ),
-        "work_cards": database.list_work_cards(
-            project_id
-        ),
-        "events": database.list_events(
-            project_id
-        ),
-    }
+    return project
 
 
-# ============================================================
+# ---------------------------------------------------------------------
 # Work Cards
-# ============================================================
+# ---------------------------------------------------------------------
 
 @app.get("/api/work-cards")
 async def list_work_cards(
-    session: str | None = Cookie(
-        default=None
-    ),
-) -> dict[str, Any]:
-
-    require_auth(session)
+    project_id: Optional[int] = None,
+    session: Optional[str] = Cookie(default=None),
+):
+    _require_session(session)
 
     return {
-        "work_cards": database.list_work_cards()
+        "cards": database.list_work_cards(project_id),
     }
 
 
 @app.get("/api/work-cards/{card_id}")
 async def get_work_card(
     card_id: int,
-    session: str | None = Cookie(
-        default=None
-    ),
-) -> dict[str, Any]:
+    session: Optional[str] = Cookie(default=None),
+):
+    _require_session(session)
 
-    require_auth(session)
-
-    card = database.get_work_card(
-        card_id
-    )
+    card = database.get_work_card(card_id)
 
     if not card:
         raise HTTPException(
             status_code=404,
-            detail="Work Card غير موجود.",
+            detail="بطاقة العمل غير موجودة",
         )
 
-    return {
-        "work_card": card
-    }
+    return card
+
+
+class WorkCardActionRequest(BaseModel):
+    action: ApprovalAction
 
 
 @app.post("/api/work-cards/{card_id}/action")
 async def work_card_action(
     card_id: int,
-    request: CardActionRequest,
-    session: str | None = Cookie(
-        default=None
-    ),
-) -> dict[str, Any]:
+    payload: WorkCardActionRequest,
+    session: Optional[str] = Cookie(default=None),
+):
+    _require_session(session)
 
-    require_auth(session)
-
-    action = request.action.lower().strip()
-
-    if action == "approve":
-        result = await task_manager.approve(
-            card_id
+    try:
+        result = await task_manager.handle_action(
+            card_id=card_id,
+            action=payload.action,
         )
-
-    elif action == "reject":
-        result = await task_manager.reject(
-            card_id
-        )
-
-    elif action == "pause":
-        result = await task_manager.pause(
-            card_id
-        )
-
-    elif action == "stop":
-        result = await task_manager.stop(
-            card_id
-        )
-
-    elif action == "resume":
-        result = await task_manager.resume(
-            card_id
-        )
-
-    else:
+    except ValueError as exc:
         raise HTTPException(
             status_code=400,
-            detail="إجراء غير معروف.",
+            detail=str(exc),
         )
 
-    return result
+    return {
+        "success": True,
+        "result": result,
+    }
 
 
-# ============================================================
+# ---------------------------------------------------------------------
 # Code analysis
-# ============================================================
+# ---------------------------------------------------------------------
+
+class AnalyzeCodeRequest(BaseModel):
+    code: str
+    filename: str = "uploaded_code.py"
+
 
 @app.post("/api/code/analyze")
 async def analyze_code(
-    request: CodeAnalysisRequest,
-    session: str | None = Cookie(
-        default=None
-    ),
-) -> dict[str, Any]:
+    payload: AnalyzeCodeRequest,
+    session: Optional[str] = Cookie(default=None),
+):
+    _require_session(session)
 
-    require_auth(session)
+    if len(payload.code) > 500_000:
+        raise HTTPException(
+            status_code=413,
+            detail="الملف كبير جداً للتحليل",
+        )
 
-    result = code_analyzer.analyze(
-        request.code
+    return code_analyzer.analyze(
+        code=payload.code,
+        filename=payload.filename,
     )
 
-    database.add_event(
-        event_type=EventType.SECURITY.value,
-        message="Code analysis completed.",
-    )
 
-    return result
-
-
-# ============================================================
-# File uploads
-# ============================================================
-
-def _safe_filename(
-    filename: str,
-) -> str:
-
-    filename = Path(
-        filename
-    ).name
-
-    allowed = (
-        "abcdefghijklmnopqrstuvwxyz"
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        "0123456789"
-        "._-"
-    )
-
-    cleaned = "".join(
-        char if char in allowed else "_"
-        for char in filename
-    )
-
-    return cleaned[:180] or "upload"
-
-
-def _zip_is_safe(
-    zip_path: Path,
-) -> bool:
-
-    try:
-        with zipfile.ZipFile(
-            zip_path,
-            "r",
-        ) as archive:
-
-            root = zip_path.parent.resolve()
-
-            for member in archive.infolist():
-
-                target = (
-                    root
-                    / member.filename
-                ).resolve()
-
-                if (
-                    target != root
-                    and root not in target.parents
-                ):
-                    return False
-
-        return True
-
-    except zipfile.BadZipFile:
-        return False
-
+# ---------------------------------------------------------------------
+# File upload
+# ---------------------------------------------------------------------
 
 @app.post("/api/upload")
 async def upload_file(
+    request: Request,
     file: UploadFile = File(...),
-    project_id: int | None = None,
-    session: str | None = Cookie(
-        default=None
-    ),
-) -> dict[str, Any]:
+    project_id: Optional[int] = None,
+    session: Optional[str] = Cookie(default=None),
+):
+    _require_session(session)
 
-    require_auth(session)
+    max_size = settings.max_upload_mb * 1024 * 1024
 
-    if not file.filename:
+    original_name = file.filename or "uploaded_file"
+    safe_name = Path(original_name).name
+
+    if safe_name in {"", ".", ".."}:
         raise HTTPException(
             status_code=400,
-            detail="اسم الملف غير موجود.",
+            detail="اسم الملف غير صالح",
         )
 
-    filename = _safe_filename(
-        file.filename
+    upload_root = Path(settings.upload_dir)
+    upload_root.mkdir(parents=True, exist_ok=True)
+
+    project_folder = (
+        upload_root / str(project_id)
+        if project_id is not None
+        else upload_root / "general"
     )
 
-    upload_root = Path(
-        settings.upload_dir
-    )
+    project_folder.mkdir(parents=True, exist_ok=True)
 
-    upload_root.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    target = project_folder / safe_name
 
-    target = upload_root / (
-        f"{secrets.token_hex(12)}"
-        f"_{filename}"
-    )
+    # Avoid accidental overwrite.
+    if target.exists():
+        target = project_folder / (
+            f"{target.stem}_{secrets.token_hex(4)}{target.suffix}"
+        )
 
-    size = 0
-    digest = hashlib.sha256()
+    total = 0
+    sha256 = hashlib.sha256()
 
     try:
         with target.open("wb") as output:
-
             while True:
-
-                chunk = await file.read(
-                    1024 * 1024
-                )
+                chunk = await file.read(1024 * 1024)
 
                 if not chunk:
                     break
 
-                size += len(chunk)
+                total += len(chunk)
 
-                if (
-                    size
-                    > settings.max_upload_bytes
-                ):
+                if total > max_size:
+                    target.unlink(missing_ok=True)
+
                     raise HTTPException(
                         status_code=413,
-                        detail=(
-                            "الملف يتجاوز الحد "
-                            "المسموح به."
-                        ),
+                        detail=f"الحد الأقصى للرفع هو {settings.max_upload_mb}MB",
                     )
 
-                digest.update(chunk)
                 output.write(chunk)
+                sha256.update(chunk)
 
-    except Exception:
-        if target.exists():
-            target.unlink()
-
+    except HTTPException:
         raise
 
-    sha256 = digest.hexdigest()
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
 
-    file_id = database.add_uploaded_file(
-        original_name=filename,
-        stored_path=str(target),
-        size_bytes=size,
-        sha256=sha256,
+    uploaded_id = database.create_uploaded_file(
         project_id=project_id,
-    )
-
-    is_zip = (
-        filename.lower().endswith(".zip")
-    )
-
-    zip_safe = None
-
-    if is_zip:
-        zip_safe = _zip_is_safe(
-            target
-        )
-
-        if not zip_safe:
-            database.add_event(
-                event_type=EventType.SECURITY.value,
-                message=(
-                    "Unsafe ZIP archive rejected."
-                ),
-                project_id=project_id,
-            )
-
-            target.unlink(
-                missing_ok=True
-            )
-
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "ملف ZIP يحتوي على مسارات "
-                    "غير آمنة."
-                ),
-            )
-
-    database.add_event(
-        event_type=EventType.INFO.value,
-        message=(
-            f"File uploaded: {filename}"
-        ),
-        project_id=project_id,
+        filename=target.name,
+        original_filename=safe_name,
+        path=str(target),
+        size=total,
+        sha256=sha256.hexdigest(),
     )
 
     return {
         "success": True,
-        "file_id": file_id,
-        "filename": filename,
-        "size": size,
-        "sha256": sha256,
-        "zip": is_zip,
-        "zip_safe": zip_safe,
+        "file_id": uploaded_id,
+        "filename": target.name,
+        "size": total,
+        "sha256": sha256.hexdigest(),
     }
 
 
-# ============================================================
-# Browser
-# ============================================================
+# ---------------------------------------------------------------------
+# Browser automation
+# ---------------------------------------------------------------------
+
+class BrowserOpenRequest(BaseModel):
+    project_id: int
+    site_name: str
+    url: str
+
 
 @app.post("/api/browser/open")
 async def browser_open(
-    request: BrowserOpenRequest,
-    session: str | None = Cookie(
-        default=None
-    ),
-) -> dict[str, Any]:
+    payload: BrowserOpenRequest,
+    session: Optional[str] = Cookie(default=None),
+):
+    _require_session(session)
 
-    require_auth(session)
-
-    project = database.get_project(
-        request.project_id
+    return await browser.open_session(
+        project_id=payload.project_id,
+        site_name=payload.site_name,
+        url=payload.url,
     )
 
-    if not project:
-        raise HTTPException(
-            status_code=404,
-            detail="المشروع غير موجود.",
-        )
 
-    try:
-        page = await browser.open_session(
-            project_id=request.project_id,
-            site_name=request.site_name,
-            url=request.url,
-        )
-
-        return {
-            "success": True,
-            "url": page.url,
-            "title": await page.title(),
-        }
-
-    except Exception as exc:
-
-        database.add_event(
-            event_type=EventType.ERROR.value,
-            message=(
-                "Browser open failed: "
-                f"{type(exc).__name__}"
-            ),
-            project_id=request.project_id,
-        )
-
-        raise HTTPException(
-            status_code=500,
-            detail="تعذر فتح جلسة المتصفح.",
-        ) from exc
+class BrowserNavigateRequest(BaseModel):
+    project_id: int
+    site_name: str
+    url: str
 
 
 @app.post("/api/browser/navigate")
 async def browser_navigate(
-    request: BrowserNavigateRequest,
-    session: str | None = Cookie(
-        default=None
-    ),
-) -> dict[str, Any]:
+    payload: BrowserNavigateRequest,
+    session: Optional[str] = Cookie(default=None),
+):
+    _require_session(session)
 
-    require_auth(session)
-
-    result = await browser.navigate(
-        project_id=request.project_id,
-        url=request.url,
+    return await browser.navigate(
+        project_id=payload.project_id,
+        site_name=payload.site_name,
+        url=payload.url,
     )
 
-    return result
 
-
-@app.get("/api/browser/{project_id}/status")
+@app.get("/api/browser/status")
 async def browser_status(
     project_id: int,
-    session: str | None = Cookie(
-        default=None
-    ),
-) -> dict[str, Any]:
+    site_name: str,
+    session: Optional[str] = Cookie(default=None),
+):
+    _require_session(session)
 
-    require_auth(session)
-
-    result = await browser.check_session(
-        project_id
+    return await browser.check_session(
+        project_id=project_id,
+        site_name=site_name,
     )
 
-    return result
 
-
-@app.post("/api/browser/{project_id}/close")
+@app.post("/api/browser/close")
 async def browser_close(
     project_id: int,
-    session: str | None = Cookie(
-        default=None
-    ),
-) -> dict[str, Any]:
-
-    require_auth(session)
+    site_name: str,
+    session: Optional[str] = Cookie(default=None),
+):
+    _require_session(session)
 
     await browser.close_session(
-        project_id
+        project_id=project_id,
+        site_name=site_name,
     )
 
-    return {
-        "success": True
-    }
+    return {"success": True}
 
 
-# ============================================================
-# Protected secret panel
-# ============================================================
+# ---------------------------------------------------------------------
+# Secret / API panel
+# ---------------------------------------------------------------------
+
+class PanelVerifyRequest(BaseModel):
+    password: str
+
 
 @app.post("/api/panel/verify")
 async def verify_panel(
-    password: str,
-    session: str | None = Cookie(
-        default=None
-    ),
-) -> dict[str, Any]:
+    payload: PanelVerifyRequest,
+    session: Optional[str] = Cookie(default=None),
+):
+    _require_session(session)
 
-    require_auth(session)
+    configured = settings.api_panel_password or ""
 
-    if not secrets.compare_digest(
-        password,
-        settings.api_panel_password,
-    ):
+    valid = secrets.compare_digest(
+        payload.password,
+        configured,
+    )
+
+    if not valid:
         raise HTTPException(
-            status_code=401,
-            detail="كلمة مرور اللوحة غير صحيحة.",
+            status_code=403,
+            detail="كلمة مرور اللوحة السرية غير صحيحة",
         )
 
     return {
-        "success": True
+        "success": True,
+        "message": "تم فتح اللوحة السرية",
     }
 
 
+class SecretCreateRequest(BaseModel):
+    project_id: Optional[int] = None
+    name: str
+    value: str
+
+
 @app.post("/api/secrets")
-async def save_secret(
-    request: SecretRequest,
-    session: str | None = Cookie(
-        default=None
-    ),
-) -> dict[str, Any]:
+async def create_secret(
+    payload: SecretCreateRequest,
+    session: Optional[str] = Cookie(default=None),
+):
+    _require_session(session)
 
-    require_auth(session)
+    if not payload.name.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="اسم السر مطلوب",
+        )
 
-    encrypted = secret_box.encrypt(
-        request.value
-    )
+    if not payload.value:
+        raise HTTPException(
+            status_code=400,
+            detail="قيمة السر مطلوبة",
+        )
 
-    database.save_secret(
-        name=request.name,
+    encrypted = secret_box.encrypt(payload.value)
+
+    secret_id = database.create_secret(
+        project_id=payload.project_id,
+        name=payload.name.strip(),
         encrypted_value=encrypted,
-    )
-
-    database.add_event(
-        event_type=EventType.SECURITY.value,
-        message=(
-            f"Encrypted secret saved: "
-            f"{request.name}"
-        ),
     )
 
     return {
         "success": True,
-        "name": request.name,
+        "secret_id": secret_id,
     }
 
 
-# ============================================================
+# ---------------------------------------------------------------------
 # Events
-# ============================================================
+# ---------------------------------------------------------------------
 
 @app.get("/api/events")
-async def events(
-    project_id: int | None = None,
-    session: str | None = Cookie(
-        default=None
-    ),
-) -> dict[str, Any]:
+async def list_events(
+    project_id: Optional[int] = None,
+    limit: int = 100,
+    session: Optional[str] = Cookie(default=None),
+):
+    _require_session(session)
 
-    require_auth(session)
+    limit = max(1, min(limit, 500))
 
     return {
         "events": database.list_events(
             project_id=project_id,
-            limit=200,
-        )
-}
+            limit=limit,
+        ),
+    }
