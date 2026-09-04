@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>Autonomous Business Manager</title>
+
+    <link
+        rel="stylesheet"
+        href="/static/style.css"
+    >
+</head>
+
+<body class="login-page">
+
+    <main class="login-container">
+
+        <section class="login-card">
+
+            <div class="brain">
+                🧠
+            </div>
+
+            <h1>
+                <°ارحب يا وجه النقاء>°
+            </h1>
+
+            <p class="login-subtitle">
+                Autonomous Business Manager
+            </p>
+
+            <form id="loginForm">
+
+                <label for="password">
+                    كلمة المرور
+                </label>
+
+                <input
+                    id="password"
+                    name="password"
+                    type="password"
+                    autocomplete="current-password"
+                    placeholder="أدخل كلمة المرور"
+                    required
+                >
+
+                <button
+                    type="submit"
+                    class="primary-button"
+                >
+                    دخول النظام
+                </button>
+
+            </form>
+
+            <div
+                id="loginError"
+                class="error-message hidden"
+            ></div>
+
+        </section>
+
+    </main>
+
+    <script>
+        const form = document.getElementById(
+            "loginForm"
+        );
+
+        const password = document.getElementById(
+            "password"
+        );
+
+        const errorBox = document.getElementById(
+            "loginError"
+        );
+
+        form.addEventListener(
+            "submit",
+            async (event) => {
+
+                event.preventDefault();
+
+                errorBox.classList.add(
+                    "hidden"
+                );
+
+                try {
+
+                    const response =
+                        await fetch(
+                            "/api/login",
+                            {
+                                method: "POST",
+                                headers: {
+                                    "Content-Type":
+                                        "application/json"
+                                },
+                                body: JSON.stringify({
+                                    password:
+                                        password.value
+                                })
+                            }
+                        );
+
+                    const data =
+                        await response.json();
+
+                    if (!response.ok) {
+                        throw new Error(
+                            data.detail ||
+                            "فشل تسجيل الدخول."
+                        );
+                    }
+
+                    /*
+                     * The server returns a session token.
+                     *
+                     * We intentionally keep it in sessionStorage
+                     * rather than localStorage so it disappears
+                     * when the browser session is closed.
+                     */
+                    sessionStorage.setItem(
+                        "abm_session",
+                        data.session
+                    );
+
+                    window.location.href =
+                        "/dashboard";
+
+                } catch (error) {
+
+                    errorBox.textContent =
+                        error.message;
+
+                    errorBox.classList.remove(
+                        "hidden"
+                    );
+                }
+            }
+        );
+    </script>
+
+</body>
+</html>
