@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import secrets
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -27,9 +27,9 @@ FRONTEND_DIR = BASE_DIR / "frontend"
 STATIC_DIR = FRONTEND_DIR / "static"
 
 
-# ----------------------------------------------------------------------
-# Core services
-# ----------------------------------------------------------------------
+# ================================================================
+# الخدمات الأساسية
+# ================================================================
 
 db = Database(settings.database_path)
 
@@ -71,9 +71,9 @@ task_manager = TaskManager(
 _active_sessions: set[str] = set()
 
 
-# ----------------------------------------------------------------------
-# Request models
-# ----------------------------------------------------------------------
+# ================================================================
+# نماذج الطلبات
+# ================================================================
 
 class LoginRequest(BaseModel):
     password: str = Field(min_length=1)
@@ -120,9 +120,9 @@ class SecretPanelRequest(BaseModel):
     password: str = Field(min_length=1)
 
 
-# ----------------------------------------------------------------------
-# Authentication
-# ----------------------------------------------------------------------
+# ================================================================
+# المصادقة
+# ================================================================
 
 def _cookie_secure() -> bool:
     return settings.app_env.lower() == "production"
@@ -160,30 +160,15 @@ def _require_session(
     return token
 
 
-# ----------------------------------------------------------------------
-# Connectivity callbacks
-# ----------------------------------------------------------------------
+# ================================================================
+# الاتصال بالإنترنت
+# ================================================================
 
 async def _handle_offline() -> None:
-    """
-    Pause running tasks when the internet connection disappears.
-    """
-
     try:
         await task_manager.handle_offline()
     except Exception:
-        try:
-            db.execute_script(
-                """
-                UPDATE work_cards
-                SET status = 'paused',
-                    error_message = 'connection_lost',
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE status = 'running'
-                """
-            )
-        except Exception:
-            pass
+        pass
 
     try:
         db.create_event(
@@ -203,33 +188,17 @@ async def _handle_offline() -> None:
 
 
 async def _handle_online() -> None:
-    """
-    Resume tasks that were paused because of connectivity loss.
-    """
-
     try:
         await task_manager.handle_online()
     except Exception:
-        try:
-            db.execute_script(
-                """
-                UPDATE work_cards
-                SET status = 'queued',
-                    error_message = NULL,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE status = 'paused'
-                  AND error_message = 'connection_lost'
-                """
-            )
-        except Exception:
-            pass
+        pass
 
     try:
         db.create_event(
             event_type="connection_restored",
             message=(
                 "عاد اتصال الإنترنت. "
-                "تم استئناف الأعمال المتوقفة بسبب الانقطاع."
+                "تم استئناف الأعمال المتوقفة."
             ),
         )
     except Exception:
@@ -241,28 +210,21 @@ async def _handle_online() -> None:
         pass
 
 
-# ----------------------------------------------------------------------
-# Application lifecycle
-# ----------------------------------------------------------------------
+# ================================================================
+# دورة حياة التطبيق
+# ================================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Initialize and safely shut down all application services.
-    """
+
+    settings.ensure_directories()
 
     db.initialize()
 
     try:
-        settings.ensure_directories()
-    except Exception:
-        pass
-
-    try:
         await browser.initialize()
     except Exception:
-        # Browser automation should not prevent the dashboard
-        # from starting. Browser operations will report their own errors.
+        # عدم تشغيل المتصفح لا يمنع تشغيل لوحة التحكم.
         pass
 
     connectivity.on_offline(_handle_offline)
@@ -276,6 +238,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+
         try:
             await task_manager.shutdown()
         except Exception:
@@ -303,14 +266,16 @@ app = FastAPI(
 if STATIC_DIR.exists():
     app.mount(
         "/static",
-        StaticFiles(directory=str(STATIC_DIR)),
+        StaticFiles(
+            directory=str(STATIC_DIR)
+        ),
         name="static",
     )
 
 
-# ----------------------------------------------------------------------
-# Pages
-# ----------------------------------------------------------------------
+# ================================================================
+# الصفحات
+# ================================================================
 
 @app.get("/")
 async def root():
@@ -347,9 +312,9 @@ async def dashboard(
     )
 
 
-# ----------------------------------------------------------------------
-# Health
-# ----------------------------------------------------------------------
+# ================================================================
+# الصحة
+# ================================================================
 
 @app.get("/health")
 async def health():
@@ -363,9 +328,20 @@ async def health():
     }
 
 
-# ----------------------------------------------------------------------
-# Login / logout
-# ----------------------------------------------------------------------
+@app.get("/api/health")
+async def api_health():
+    return {
+        "status": "ok",
+        "online": connectivity.is_online,
+        "browser_initialized": (
+            browser._playwright is not None
+        ),
+    }
+
+
+# ================================================================
+# تسجيل الدخول
+# ================================================================
 
 @app.post("/api/login")
 async def login(
@@ -432,9 +408,9 @@ async def logout(
     return response
 
 
-# ----------------------------------------------------------------------
-# Projects
-# ----------------------------------------------------------------------
+# ================================================================
+# المشاريع
+# ================================================================
 
 @app.get("/api/projects")
 async def list_projects(
@@ -496,12 +472,13 @@ async def delete_project(
 
     return {
         "success": True,
+        "message": "تم حذف المشروع.",
     }
 
 
-# ----------------------------------------------------------------------
-# Chat / Agent
-# ----------------------------------------------------------------------
+# ================================================================
+# المحادثة والوكيل
+# ================================================================
 
 @app.post("/api/chat")
 async def chat(
@@ -524,6 +501,14 @@ async def project_chat(
     project_id: int,
     _: str = Depends(_require_session),
 ):
+    project = db.get_project(project_id)
+
+    if not project:
+        raise HTTPException(
+            status_code=404,
+            detail="المشروع غير موجود.",
+        )
+
     return {
         "messages": db.list_chat_messages(
             project_id
@@ -531,15 +516,16 @@ async def project_chat(
     }
 
 
-# ----------------------------------------------------------------------
-# Work cards
-# ----------------------------------------------------------------------
+# ================================================================
+# بطاقات العمل
+# ================================================================
 
 @app.get("/api/work-cards")
 async def list_work_cards(
     project_id: Optional[int] = None,
     _: str = Depends(_require_session),
 ):
+
     if project_id is not None:
         cards = db.list_work_cards(
             project_id
@@ -593,54 +579,122 @@ async def work_card_action(
         )
 
     try:
+
+        # --------------------------------------------------------
+        # الموافقة
+        # --------------------------------------------------------
+
         if action == "approve":
-            result = await task_manager.approve(
+
+            approved = await task_manager.approve(
                 card_id
             )
 
-            if result:
-                await task_manager.run(
-                    card_id
+            if not approved:
+                raise HTTPException(
+                    status_code=400,
+                    detail="تعذر اعتماد المهمة.",
                 )
+
+            started = await task_manager.run(
+                card_id
+            )
 
             return {
                 "success": True,
-                "result": db.get_work_card(
+                "approved": True,
+                "started": started,
+                "work_card": db.get_work_card(
                     card_id
                 ),
             }
 
+        # --------------------------------------------------------
+        # الرفض
+        # --------------------------------------------------------
+
         if action == "reject":
-            result = await approval_manager.reject(
+
+            # مهم:
+            # ApprovalManager.reject() متزامنة.
+            result = approval_manager.reject(
                 card_id=card_id,
                 note=request.note,
             )
 
-        elif action == "pause":
+            return {
+                "success": bool(result),
+                "result": result,
+                "work_card": db.get_work_card(
+                    card_id
+                ),
+            }
+
+        # --------------------------------------------------------
+        # إيقاف مؤقت
+        # --------------------------------------------------------
+
+        if action == "pause":
+
             result = await task_manager.pause(
                 work_card_id=card_id,
-                reason=request.note or "manual_pause",
+                reason=(
+                    request.note
+                    or "manual_pause"
+                ),
             )
 
-        elif action == "stop":
+            return {
+                "success": bool(result),
+                "result": result,
+                "work_card": db.get_work_card(
+                    card_id
+                ),
+            }
+
+        # --------------------------------------------------------
+        # إيقاف نهائي
+        # --------------------------------------------------------
+
+        if action == "stop":
+
             result = await task_manager.stop(
                 work_card_id=card_id,
             )
 
-        elif action == "resume":
+            return {
+                "success": bool(result),
+                "result": result,
+                "work_card": db.get_work_card(
+                    card_id
+                ),
+            }
+
+        # --------------------------------------------------------
+        # استئناف
+        # --------------------------------------------------------
+
+        if action == "resume":
+
             result = await task_manager.resume(
                 work_card_id=card_id,
             )
 
-        else:
-            raise ValueError(
-                "إجراء غير مدعوم."
-            )
+            return {
+                "success": bool(result),
+                "result": result,
+                "work_card": db.get_work_card(
+                    card_id
+                ),
+            }
 
-        return {
-            "success": True,
-            "result": result,
-        }
+        raise HTTPException(
+            status_code=400,
+            detail="إجراء غير مدعوم.",
+        )
+
+    except HTTPException:
+        raise
 
     except Exception as exc:
         raise HTTPException(
@@ -649,9 +703,9 @@ async def work_card_action(
         ) from exc
 
 
-# ----------------------------------------------------------------------
-# Events
-# ----------------------------------------------------------------------
+# ================================================================
+# الأحداث
+# ================================================================
 
 @app.get("/api/events")
 async def events(
@@ -670,18 +724,65 @@ async def events(
     }
 
 
-# ----------------------------------------------------------------------
-# Browser automation
-# ----------------------------------------------------------------------
+# ================================================================
+# حالة النظام
+# ================================================================
 
-@app.post("/api/browser/open")
-async def browser_open(
-    request: BrowserOpenRequest,
+@app.get("/api/system/status")
+async def system_status(
     _: str = Depends(_require_session),
 ):
-    project = db.get_project(
-        request.project_id
-    )
+    try:
+        cards = db.list_all_work_cards()
+    except Exception:
+        cards = []
+
+    running = 0
+    paused = 0
+    queued = 0
+    completed = 0
+    errors = 0
+
+    for card in cards:
+        status = str(
+            card.get("status", "")
+        ).lower()
+
+        if status == "running":
+            running += 1
+        elif status == "paused":
+            paused += 1
+        elif status == "queued":
+            queued += 1
+        elif status == "completed":
+            completed += 1
+        elif status == "error":
+            errors += 1
+
+    return {
+        "online": connectivity.is_online,
+        "browser_initialized": (
+            browser._playwright is not None
+        ),
+        "tasks": {
+            "total": len(cards),
+            "running": running,
+            "paused": paused,
+            "queued": queued,
+            "completed": completed,
+            "errors": errors,
+        },
+    }
+
+
+# ================================================================
+# المتصفح
+# ================================================================
+
+def _require_project(
+    project_id: int,
+):
+    project = db.get_project(project_id)
 
     if not project:
         raise HTTPException(
@@ -689,7 +790,18 @@ async def browser_open(
             detail="المشروع غير موجود.",
         )
 
-    # BrowserManager uses the URL supplied as the site/profile origin.
+    return project
+
+
+@app.post("/api/browser/open")
+async def browser_open(
+    request: BrowserOpenRequest,
+    _: str = Depends(_require_session),
+):
+    _require_project(
+        request.project_id
+    )
+
     target = request.url or request.site
 
     try:
@@ -715,44 +827,19 @@ async def browser_navigate(
     request: BrowserNavigateRequest,
     _: str = Depends(_require_session),
 ):
+    _require_project(
+        request.project_id
+    )
+
     try:
         result = await browser.navigate(
             project_id=request.project_id,
             url=request.url,
         )
 
-        if result.get("session_expired"):
-            try:
-                await notifications.send_session_expired(
-                    request.project_id
-                )
-            except Exception:
-                pass
-
         return {
             "success": True,
             "browser": result,
-        }
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
-
-
-@app.get("/api/browser/status/{project_id}")
-async def browser_status(
-    project_id: int,
-    _: str = Depends(_require_session),
-):
-    try:
-        result = await browser.get_status(
-            project_id
-        )
-
-        return {
-            "status": result,
         }
 
     except Exception as exc:
@@ -767,6 +854,10 @@ async def browser_click(
     request: BrowserClickRequest,
     _: str = Depends(_require_session),
 ):
+    _require_project(
+        request.project_id
+    )
+
     try:
         result = await browser.click(
             project_id=request.project_id,
@@ -790,6 +881,10 @@ async def browser_fill(
     request: BrowserFillRequest,
     _: str = Depends(_require_session),
 ):
+    _require_project(
+        request.project_id
+    )
+
     try:
         result = await browser.fill(
             project_id=request.project_id,
@@ -809,19 +904,21 @@ async def browser_fill(
         ) from exc
 
 
-@app.post("/api/browser/close/{project_id}")
-async def browser_close(
+@app.get("/api/browser/status/{project_id}")
+async def browser_status(
     project_id: int,
     _: str = Depends(_require_session),
 ):
+    _require_project(project_id)
+
     try:
-        await browser.close_project(
+        result = await browser.get_status(
             project_id
         )
 
         return {
             "success": True,
-            "message": "تم إغلاق جلسة المتصفح.",
+            "browser": result,
         }
 
     except Exception as exc:
@@ -831,40 +928,148 @@ async def browser_close(
         ) from exc
 
 
-# ----------------------------------------------------------------------
-# Code analyzer
-# ----------------------------------------------------------------------
+@app.get("/api/browser/text/{project_id}")
+async def browser_text(
+    project_id: int,
+    _: str = Depends(_require_session),
+):
+    _require_project(project_id)
+
+    try:
+        result = await browser.get_text(
+            project_id
+        )
+
+        return {
+            "success": True,
+            "text": result,
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+
+@app.post("/api/browser/inspect/{project_id}")
+async def browser_inspect(
+    project_id: int,
+    _: str = Depends(_require_session),
+):
+    _require_project(project_id)
+
+    try:
+        result = await browser.inspect_page(
+            project_id
+        )
+
+        return {
+            "success": True,
+            "page": result,
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+
+@app.post("/api/browser/screenshot/{project_id}")
+async def browser_screenshot(
+    project_id: int,
+    _: str = Depends(_require_session),
+):
+    _require_project(project_id)
+
+    try:
+        result = await browser.screenshot(
+            project_id
+        )
+
+        return {
+            "success": True,
+            "screenshot": result,
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+
+@app.post("/api/browser/close/{project_id}")
+async def browser_close(
+    project_id: int,
+    _: str = Depends(_require_session),
+):
+    _require_project(project_id)
+
+    try:
+        result = await browser.close_project(
+            project_id
+        )
+
+        return {
+            "success": True,
+            "result": result,
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+
+# ================================================================
+# تحليل الملفات البرمجية
+# ================================================================
 
 @app.post("/api/code/analyze")
 async def analyze_code(
     file: UploadFile = File(...),
     _: str = Depends(_require_session),
 ):
-    if not file.filename:
+
+    filename = file.filename or "uploaded_code"
+
+    if not filename:
         raise HTTPException(
             status_code=400,
-            detail="اسم الملف غير موجود.",
+            detail="اسم الملف غير صالح.",
         )
 
-    content = await file.read()
+    try:
+        raw = await file.read()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"تعذر قراءة الملف: {exc}",
+        ) from exc
 
-    if len(content) > settings.max_upload_size:
+    if len(raw) > settings.max_upload_size:
         raise HTTPException(
             status_code=413,
             detail="حجم الملف أكبر من الحد المسموح.",
         )
 
     try:
-        text = content.decode("utf-8")
-    except UnicodeDecodeError as exc:
+        source = raw.decode(
+            "utf-8",
+            errors="replace",
+        )
+    except Exception as exc:
         raise HTTPException(
             status_code=400,
-            detail="الملف يجب أن يكون نصياً بترميز UTF-8.",
+            detail=f"تعذر قراءة النص: {exc}",
         ) from exc
 
     result = code_analyzer.analyze(
-        filename=file.filename,
-        source=text,
+        filename=filename,
+        source=source,
     )
 
     return {
@@ -873,84 +1078,186 @@ async def analyze_code(
     }
 
 
-# ----------------------------------------------------------------------
-# Secret panel
-# ----------------------------------------------------------------------
+# ================================================================
+# رفع الملفات
+# ================================================================
 
-@app.post("/api/secrets/panel/verify")
-async def verify_secret_panel(
+@app.post("/api/uploads")
+async def upload_file(
+    file: UploadFile = File(...),
+    project_id: Optional[int] = None,
+    _: str = Depends(_require_session),
+):
+
+    filename = Path(
+        file.filename or "uploaded_file"
+    ).name
+
+    if not filename:
+        raise HTTPException(
+            status_code=400,
+            detail="اسم الملف غير صالح.",
+        )
+
+    if project_id is not None:
+        _require_project(project_id)
+
+    try:
+        content = await file.read()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"تعذر قراءة الملف: {exc}",
+        ) from exc
+
+    if len(content) > settings.max_upload_size:
+        raise HTTPException(
+            status_code=413,
+            detail="حجم الملف أكبر من الحد المسموح.",
+        )
+
+    upload_dir = settings.upload_directory
+
+    target = upload_dir / filename
+
+    # منع الكتابة خارج مجلد uploads.
+    target = target.resolve()
+
+    if upload_dir.resolve() not in target.parents:
+        raise HTTPException(
+            status_code=400,
+            detail="مسار الملف غير صالح.",
+        )
+
+    target.write_bytes(content)
+
+    try:
+        record = db.create_uploaded_file(
+            project_id=project_id,
+            filename=filename,
+            path=str(target),
+            size=len(content),
+        )
+    except Exception:
+        record = {
+            "filename": filename,
+            "path": str(target),
+            "size": len(content),
+            "project_id": project_id,
+        }
+
+    return {
+        "success": True,
+        "file": record,
+    }
+
+
+# ================================================================
+# الأسرار
+# ================================================================
+
+@app.post("/api/secrets/unlock")
+async def unlock_secrets(
     request: SecretPanelRequest,
     _: str = Depends(_require_session),
 ):
-    configured = settings.api_panel_password
-
-    if not configured:
+    if not settings.api_panel_password:
         raise HTTPException(
             status_code=503,
             detail="لوحة الأسرار غير مهيأة بعد.",
         )
 
-    if not security.secure_compare(
+    valid = security.secure_compare(
         request.password,
-        configured,
-    ):
+        settings.api_panel_password,
+    )
+
+    if not valid:
         raise HTTPException(
-            status_code=403,
+            status_code=401,
             detail="كلمة مرور لوحة الأسرار غير صحيحة.",
         )
 
     return {
         "success": True,
-        "message": "تم التحقق بنجاح.",
-        "encryption_available": (
-            security.encryption_available
-        ),
-        "secrets": db.list_secrets_metadata(),
+        "message": "تم فتح لوحة الأسرار.",
     }
 
 
-# ----------------------------------------------------------------------
-# Browser / project status
-# ----------------------------------------------------------------------
+# ================================================================
+# إعدادات النظام العامة
+# ================================================================
 
-@app.get("/api/status")
-async def system_status(
+@app.get("/api/settings")
+async def get_settings(
     _: str = Depends(_require_session),
 ):
     return {
-        "online": connectivity.is_online,
-        "running_tasks": task_manager.get_running_ids(),
-        "encryption_available": (
-            security.encryption_available
+        "app_name": settings.app_name,
+        "app_env": settings.app_env,
+        "debug": settings.debug,
+        "browser_headless": settings.browser_headless,
+        "browser_timeout": settings.browser_timeout,
+        "connectivity_interval": settings.connectivity_interval,
+        "timezone": settings.timezone,
+        "openai_configured": bool(
+            settings.openai_api_key
         ),
-        "telegram_configured": (
-            notifications.telegram_configured()
+        "telegram_configured": bool(
+            settings.telegram_bot_token
+            and settings.telegram_chat_id
         ),
-        "whatsapp_configured": (
-            notifications.whatsapp_configured()
+        "whatsapp_configured": bool(
+            settings.whatsapp_api_url
+            and settings.whatsapp_access_token
         ),
     }
 
 
-# ----------------------------------------------------------------------
-# Error handlers
-# ----------------------------------------------------------------------
+# ================================================================
+# الأحداث الخاصة بالجلسات
+# ================================================================
+
+@app.get("/api/browser/sessions")
+async def browser_sessions(
+    _: str = Depends(_require_session),
+):
+    try:
+        sessions = db.list_browser_sessions()
+    except Exception:
+        sessions = []
+
+    return {
+        "sessions": sessions,
+    }
+
+
+# ================================================================
+# خطأ عام JSON
+# ================================================================
 
 @app.exception_handler(Exception)
-async def unhandled_exception(
+async def global_exception_handler(
     request: Request,
     exc: Exception,
 ):
-    # Keep internal exception details out of production responses.
-    if settings.debug:
-        detail = str(exc)
-    else:
-        detail = "حدث خطأ داخلي في النظام."
+    # لا نكشف تفاصيل داخلية للمستخدم النهائي.
+    try:
+        db.create_event(
+            event_type="application_error",
+            message=str(exc),
+            metadata={
+                "path": request.url.path,
+                "method": request.method,
+            },
+        )
+    except Exception:
+        pass
 
     return JSONResponse(
         status_code=500,
         content={
             "success": False,
-            "detail": detail,
+            "detail": "حدث خطأ داخلي في النظام.",
         },
 )
