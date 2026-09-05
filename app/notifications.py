@@ -1,177 +1,294 @@
 from __future__ import annotations
 
-from typing import Any
+import logging
+from typing import Optional
 
 import httpx
 
-from .config import Settings
-from .database import Database
-from .models import NotificationCode
+
+logger = logging.getLogger(__name__)
 
 
 class NotificationManager:
-    def __init__(
-        self,
-        settings: Settings,
-        database: Database,
-    ):
+    """
+    Handles Telegram and WhatsApp Business notifications.
+
+    Supported notification meanings:
+        ن؟              -> connection offline / stopped
+        >س✓<            -> connection restored / resumed
+        >م? [project]   -> approval/question required
+        <|> [project]   -> session expired / re-authentication required
+
+    The manager never logs access tokens or other sensitive credentials.
+    """
+
+    def __init__(self, settings) -> None:
         self.settings = settings
-        self.database = database
 
-    async def send(
+    # ------------------------------------------------------------------
+    # Configuration status
+    # ------------------------------------------------------------------
+
+    def telegram_configured(self) -> bool:
+        return bool(
+            getattr(self.settings, "telegram_bot_token", None)
+            and getattr(self.settings, "telegram_chat_id", None)
+        )
+
+    def whatsapp_configured(self) -> bool:
+        return bool(
+            getattr(self.settings, "whatsapp_api_url", None)
+            and getattr(self.settings, "whatsapp_access_token", None)
+            and getattr(self.settings, "whatsapp_phone_number_id", None)
+            and getattr(self.settings, "whatsapp_recipient", None)
+        )
+
+    # ------------------------------------------------------------------
+    # Public notification methods
+    # ------------------------------------------------------------------
+
+    async def send_offline(self) -> None:
+        await self.send(
+            "ن؟\n"
+            "تم إيقاف الأعمال مؤقتًا بسبب انقطاع الاتصال بالإنترنت."
+        )
+
+    async def send_restored(self) -> None:
+        await self.send(
+            ">س✓<\n"
+            "تمت استعادة الاتصال. سيتم استئناف الأعمال الموقوفة."
+        )
+
+    async def send_approval_required(
         self,
-        message: str,
-    ) -> dict[str, Any]:
+        project_number: str | int,
+        message: Optional[str] = None,
+    ) -> None:
+        text = f">م? {project_number}"
 
-        results: dict[str, Any] = {
+        if message:
+            text += f"\n{message}"
+
+        text += "\n\nالمطلوب: موافقة أو رفض العملية من لوحة التحكم."
+
+        await self.send(text)
+
+    async def send_session_expired(
+        self,
+        project_number: str | int,
+        message: Optional[str] = None,
+    ) -> None:
+        text = f"<|> {project_number}"
+
+        if message:
+            text += f"\n{message}"
+
+        text += (
+            "\n\nانتهت جلسة الموقع. "
+            "يرجى تسجيل الدخول من خلال المتصفح لإعادة المصادقة."
+        )
+
+        await self.send(text)
+
+    async def send_project_message(
+        self,
+        project_number: str | int,
+        message: str,
+    ) -> None:
+        await self.send(
+            f"[مشروع {project_number}]\n{message}"
+        )
+
+    async def send(self, message: str) -> dict:
+        """
+        Send a notification through all configured channels.
+
+        Returns a small delivery report instead of raising channel-specific
+        errors to the main application.
+        """
+
+        results = {
             "telegram": False,
             "whatsapp": False,
         }
 
-        if (
-            self.settings.telegram_bot_token
-            and self.settings.telegram_chat_id
-        ):
-            results["telegram"] = (
-                await self._send_telegram(
-                    message
-                )
-            )
+        if not message:
+            return results
 
-        if self.settings.whatsapp_enabled:
-            results["whatsapp"] = (
-                await self._send_whatsapp(
-                    message
-                )
-            )
+        if self.telegram_configured():
+            results["telegram"] = await self._send_telegram(message)
+
+        if self.whatsapp_configured():
+            results["whatsapp"] = await self._send_whatsapp(message)
 
         return results
 
-    async def offline(self) -> dict[str, Any]:
-        return await self.send(
-            NotificationCode.OFFLINE.value
-        )
-
-    async def restored(self) -> dict[str, Any]:
-        return await self.send(
-            NotificationCode.RESTORED.value
-        )
-
-    async def approval_required(
-        self,
-        project_number: int,
-    ) -> dict[str, Any]:
-
-        return await self.send(
-            f"{NotificationCode.QUESTION.value} "
-            f"[{project_number}]"
-        )
-
-    async def reauth_required(
-        self,
-        project_number: int,
-    ) -> dict[str, Any]:
-
-        return await self.send(
-            f"{NotificationCode.REAUTH.value} "
-            f"[{project_number}]"
-        )
+    # ------------------------------------------------------------------
+    # Telegram
+    # ------------------------------------------------------------------
 
     async def _send_telegram(
         self,
         message: str,
     ) -> bool:
+        token = getattr(
+            self.settings,
+            "telegram_bot_token",
+            None,
+        )
+
+        chat_id = getattr(
+            self.settings,
+            "telegram_chat_id",
+            None,
+        )
+
+        if not token or not chat_id:
+            return False
 
         url = (
-            "https://api.telegram.org/bot"
-            f"{self.settings.telegram_bot_token}"
-            "/sendMessage"
+            f"https://api.telegram.org/bot"
+            f"{token}/sendMessage"
         )
 
         payload = {
-            "chat_id": self.settings.telegram_chat_id,
+            "chat_id": chat_id,
             "text": message,
         }
 
         try:
-            async with httpx.AsyncClient(
-                timeout=15,
-            ) as client:
+            timeout = httpx.Timeout(
+                connect=10.0,
+                read=15.0,
+                write=15.0,
+                pool=10.0,
+            )
 
+            async with httpx.AsyncClient(
+                timeout=timeout
+            ) as client:
                 response = await client.post(
                     url,
                     json=payload,
                 )
 
-                response.raise_for_status()
+            if 200 <= response.status_code < 300:
+                return True
 
-            return True
-
-        except Exception as exc:
-            self.database.add_event(
-                event_type="error",
-                message=(
-                    "Telegram notification failed: "
-                    f"{type(exc).__name__}"
-                ),
+            logger.warning(
+                "Telegram notification failed with status %s.",
+                response.status_code,
             )
 
-            return False
+        except (
+            httpx.HTTPError,
+            OSError,
+        ):
+            logger.exception(
+                "Telegram notification request failed."
+            )
+
+        return False
+
+    # ------------------------------------------------------------------
+    # WhatsApp Business API
+    # ------------------------------------------------------------------
 
     async def _send_whatsapp(
         self,
         message: str,
     ) -> bool:
+        api_url = getattr(
+            self.settings,
+            "whatsapp_api_url",
+            None,
+        )
 
-        if not (
-            self.settings.whatsapp_api_url
-            and self.settings.whatsapp_access_token
-            and self.settings.whatsapp_phone_number_id
-            and self.settings.whatsapp_recipient
+        access_token = getattr(
+            self.settings,
+            "whatsapp_access_token",
+            None,
+        )
+
+        phone_number_id = getattr(
+            self.settings,
+            "whatsapp_phone_number_id",
+            None,
+        )
+
+        recipient = getattr(
+            self.settings,
+            "whatsapp_recipient",
+            None,
+        )
+
+        if not all(
+            [
+                api_url,
+                access_token,
+                phone_number_id,
+                recipient,
+            ]
         ):
             return False
 
-        url = self.settings.whatsapp_api_url
+        url = api_url.rstrip("/")
 
-        headers = {
-            "Authorization": (
-                "Bearer "
-                f"{self.settings.whatsapp_access_token}"
-            ),
-            "Content-Type": "application/json",
-        }
+        # Allow either:
+        # https://graph.facebook.com/vXX.X
+        # or a complete endpoint supplied in configuration.
+        if not url.endswith(phone_number_id):
+            url = (
+                f"{url}/"
+                f"{phone_number_id}/messages"
+            )
 
         payload = {
             "messaging_product": "whatsapp",
-            "to": self.settings.whatsapp_recipient,
+            "to": recipient,
             "type": "text",
             "text": {
+                "preview_url": False,
                 "body": message,
             },
         }
 
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        }
+
         try:
-            async with httpx.AsyncClient(
-                timeout=15,
-            ) as client:
-
-                response = await client.post(
-                    url,
-                    headers=headers,
-                    json=payload,
-                )
-
-                response.raise_for_status()
-
-            return True
-
-        except Exception as exc:
-            self.database.add_event(
-                event_type="error",
-                message=(
-                    "WhatsApp notification failed: "
-                    f"{type(exc).__name__}"
-                ),
+            timeout = httpx.Timeout(
+                connect=10.0,
+                read=20.0,
+                write=20.0,
+                pool=10.0,
             )
 
-            return False
+            async with httpx.AsyncClient(
+                timeout=timeout
+            ) as client:
+                response = await client.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                )
+
+            if 200 <= response.status_code < 300:
+                return True
+
+            logger.warning(
+                "WhatsApp notification failed with status %s.",
+                response.status_code,
+            )
+
+        except (
+            httpx.HTTPError,
+            OSError,
+        ):
+            logger.exception(
+                "WhatsApp notification request failed."
+            )
+
+        return False
