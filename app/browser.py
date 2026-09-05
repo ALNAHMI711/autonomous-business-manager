@@ -20,16 +20,16 @@ from .models import EventType, WorkStatus
 
 class BrowserManager:
     """
-    Safe Playwright browser manager.
+    مدير متصفح آمن باستخدام Playwright.
 
-    This manager intentionally uses normal browser interaction.
+    يستخدم تفاعلات المتصفح الطبيعية فقط.
 
-    It does NOT:
-    - bypass CAPTCHA
-    - spoof fingerprints
-    - evade rate limits
-    - bypass authentication
-    - defeat anti-bot systems
+    لا يقوم بـ:
+    - تجاوز CAPTCHA
+    - تزوير البصمة الرقمية
+    - تجاوز حدود المعدل
+    - تجاوز المصادقة
+    - تعطيل أنظمة مكافحة الروبوتات
     """
 
     def __init__(
@@ -43,20 +43,9 @@ class BrowserManager:
         self.playwright: Playwright | None = None
         self.browser: Browser | None = None
 
-        self.contexts: dict[
-            int,
-            BrowserContext,
-        ] = {}
-
-        self.pages: dict[
-            int,
-            Page,
-        ] = {}
-
-        self.session_ids: dict[
-            int,
-            int,
-        ] = {}
+        self.contexts: dict[int, BrowserContext] = {}
+        self.pages: dict[int, Page] = {}
+        self.session_ids: dict[int, int] = {}
 
         self._lock = asyncio.Lock()
 
@@ -72,9 +61,7 @@ class BrowserManager:
 
     async def stop(self) -> None:
         async with self._lock:
-            for context in list(
-                self.contexts.values()
-            ):
+            for context in list(self.contexts.values()):
                 try:
                     await context.close()
                 except Exception:
@@ -106,18 +93,13 @@ class BrowserManager:
         site_name: str,
         url: str,
     ) -> Page:
-
         if not self._is_safe_url(url):
-            raise ValueError(
-                "URL غير مسموح به."
-            )
+            raise ValueError("URL غير مسموح به.")
 
         await self.start()
 
         if not self.browser:
-            raise RuntimeError(
-                "Browser is not available."
-            )
+            raise RuntimeError("Browser is not available.")
 
         session_dir = (
             Path(self.settings.upload_dir).parent
@@ -131,12 +113,12 @@ class BrowserManager:
             exist_ok=True,
         )
 
+        storage_file = session_dir / "storage_state.json"
+
         context = await self.browser.new_context(
             storage_state=(
-                str(session_dir / "storage_state.json")
-                if (
-                    session_dir / "storage_state.json"
-                ).exists()
+                str(storage_file)
+                if storage_file.exists()
                 else None
             ),
             viewport={
@@ -154,9 +136,7 @@ class BrowserManager:
         session_id = self.database.create_browser_session(
             site_name=site_name,
             project_id=project_id,
-            storage_path=str(
-                session_dir / "storage_state.json"
-            ),
+            storage_path=str(storage_file),
         )
 
         self.contexts[project_id] = context
@@ -169,9 +149,7 @@ class BrowserManager:
                 wait_until="domcontentloaded",
             )
 
-            await self._save_storage_state(
-                project_id
-            )
+            await self._save_storage_state(project_id)
 
             self.database.update_browser_session(
                 session_id,
@@ -188,9 +166,7 @@ class BrowserManager:
 
             self.database.add_event(
                 event_type=EventType.CONNECTION_LOST.value,
-                message=(
-                    "Browser navigation timed out."
-                ),
+                message="Browser navigation timed out.",
                 project_id=project_id,
             )
 
@@ -225,9 +201,7 @@ class BrowserManager:
         self,
         project_id: int,
     ) -> None:
-        await self._save_storage_state(
-            project_id
-        )
+        await self._save_storage_state(project_id)
 
     async def close_session(
         self,
@@ -265,11 +239,8 @@ class BrowserManager:
         project_id: int,
         url: str,
     ) -> dict[str, Any]:
-
         if not self._is_safe_url(url):
-            raise ValueError(
-                "URL غير مسموح به."
-            )
+            raise ValueError("URL غير مسموح به.")
 
         page = self.pages.get(project_id)
 
@@ -284,9 +255,7 @@ class BrowserManager:
                 wait_until="domcontentloaded",
             )
 
-            await self._save_storage_state(
-                project_id
-            )
+            await self._save_storage_state(project_id)
 
             return {
                 "success": True,
@@ -327,7 +296,6 @@ class BrowserManager:
         self,
         project_id: int,
     ) -> dict[str, Any]:
-
         page = self.pages.get(project_id)
 
         if not page:
@@ -344,7 +312,6 @@ class BrowserManager:
         self,
         project_id: int,
     ) -> dict[str, Any]:
-
         page = self.pages.get(project_id)
 
         if not page:
@@ -370,9 +337,7 @@ class BrowserManager:
             )
 
             if session_expired:
-                await self._mark_reauth(
-                    project_id
-                )
+                await self._mark_reauth(project_id)
 
                 return {
                     "active": False,
@@ -386,9 +351,7 @@ class BrowserManager:
             }
 
         except Exception:
-            await self._mark_reauth(
-                project_id
-            )
+            await self._mark_reauth(project_id)
 
             return {
                 "active": False,
@@ -400,7 +363,6 @@ class BrowserManager:
         project_id: int,
         selector: str,
     ) -> None:
-
         page = self.pages.get(project_id)
 
         if not page:
@@ -410,9 +372,7 @@ class BrowserManager:
 
         await page.locator(selector).click()
 
-        await self._save_storage_state(
-            project_id
-        )
+        await self._save_storage_state(project_id)
 
     async def fill(
         self,
@@ -420,7 +380,6 @@ class BrowserManager:
         selector: str,
         value: str,
     ) -> None:
-
         page = self.pages.get(project_id)
 
         if not page:
@@ -428,9 +387,7 @@ class BrowserManager:
                 "لا توجد جلسة متصفح."
             )
 
-        await page.locator(selector).fill(
-            value
-        )
+        await page.locator(selector).fill(value)
 
     async def press(
         self,
@@ -438,7 +395,6 @@ class BrowserManager:
         selector: str,
         key: str,
     ) -> None:
-
         page = self.pages.get(project_id)
 
         if not page:
@@ -446,27 +402,18 @@ class BrowserManager:
                 "لا توجد جلسة متصفح."
             )
 
-        await page.locator(selector).press(
-            key
-        )
+        await page.locator(selector).press(key)
 
     async def _save_storage_state(
         self,
         project_id: int,
     ) -> None:
+        context = self.contexts.get(project_id)
 
-        context = self.contexts.get(
-            project_id
-        )
-
-        session_id = self.session_ids.get(
-            project_id
-        )
+        session_id = self.session_ids.get(project_id)
 
         session = (
-            self.database.get_browser_session(
-                session_id
-            )
+            self.database.get_browser_session(session_id)
             if session_id
             else None
         )
@@ -474,9 +421,7 @@ class BrowserManager:
         if not context or not session:
             return
 
-        storage_path = session.get(
-            "storage_path"
-        )
+        storage_path = session.get("storage_path")
 
         if not storage_path:
             return
@@ -497,23 +442,20 @@ class BrowserManager:
         project_id: int,
         reason: str,
     ) -> None:
-
         self.database.update_project_status(
             project_id,
             WorkStatus.PAUSED.value,
         )
 
         self.database.execute_script(
-            """
+            f"""
             UPDATE work_cards
             SET status = 'paused',
+                error_message = 'connection_lost',
                 updated_at = CURRENT_TIMESTAMP
-            WHERE project_id = ?
+            WHERE project_id = {int(project_id)}
               AND status = 'running'
-            """.replace(
-                "?",
-                str(int(project_id)),
-            )
+            """
         )
 
         self.database.add_event(
@@ -522,9 +464,7 @@ class BrowserManager:
             project_id=project_id,
         )
 
-        session_id = self.session_ids.get(
-            project_id
-        )
+        session_id = self.session_ids.get(project_id)
 
         if session_id:
             self.database.update_browser_session(
@@ -536,23 +476,19 @@ class BrowserManager:
         self,
         project_id: int,
     ) -> None:
-
         self.database.update_project_status(
             project_id,
             WorkStatus.NEEDS_REAUTH.value,
         )
 
         self.database.execute_script(
-            """
+            f"""
             UPDATE work_cards
             SET status = 'needs_reauth',
                 updated_at = CURRENT_TIMESTAMP
-            WHERE project_id = ?
+            WHERE project_id = {int(project_id)}
               AND status IN ('running', 'queued')
-            """.replace(
-                "?",
-                str(int(project_id)),
-            )
+            """
         )
 
         self.database.add_event(
@@ -564,9 +500,7 @@ class BrowserManager:
             project_id=project_id,
         )
 
-        session_id = self.session_ids.get(
-            project_id
-        )
+        session_id = self.session_ids.get(project_id)
 
         if session_id:
             self.database.update_browser_session(
@@ -578,7 +512,6 @@ class BrowserManager:
     def _safe_name(
         value: str,
     ) -> str:
-
         allowed = (
             "abcdefghijklmnopqrstuvwxyz"
             "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -596,11 +529,10 @@ class BrowserManager:
     def _is_safe_url(
         url: str,
     ) -> bool:
-
         lowered = url.lower().strip()
 
         return (
             lowered.startswith("https://")
             or lowered.startswith("http://localhost")
             or lowered.startswith("http://127.0.0.1")
-          )
+            )
