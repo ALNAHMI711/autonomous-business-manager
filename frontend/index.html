@@ -1,740 +1,397 @@
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
-    <meta charset="UTF-8">
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0"
-    >
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-    <title>مدير الأعمال المستقل</title>
+  <title>مدير الأعمال المستقل</title>
 
-    <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css">
 </head>
 
 <body>
 
-<div class="app-shell">
+  <header class="topbar">
+    <div>
+      <h1>مدير الأعمال المستقل</h1>
+      <span id="connectionStatus">جاري الاتصال...</span>
+    </div>
 
-    <aside class="sidebar">
+    <button id="logoutBtn" class="danger-btn">
+      تسجيل الخروج
+    </button>
+  </header>
 
-        <div class="brand">
-            <div class="brand-mark">◈</div>
-            <div>
-                <strong>مدير الأعمال</strong>
-                <span>المستقل الذكي</span>
-            </div>
+  <main class="container">
+
+    <section class="welcome-panel">
+      <div>
+        <h2>&lt;°ارحب يا وجه النقاء&gt;°</h2>
+        <p>
+          مركز التحكم لإدارة المشاريع والمهام والأتمتة.
+        </p>
+      </div>
+    </section>
+
+    <section class="stats-grid">
+
+      <div class="stat-card">
+        <span>المشاريع</span>
+        <strong id="projectsCount">0</strong>
+      </div>
+
+      <div class="stat-card">
+        <span>بطاقات العمل</span>
+        <strong id="cardsCount">0</strong>
+      </div>
+
+      <div class="stat-card">
+        <span>قيد التنفيذ</span>
+        <strong id="runningCount">0</strong>
+      </div>
+
+      <div class="stat-card">
+        <span>تحتاج موافقة</span>
+        <strong id="approvalCount">0</strong>
+      </div>
+
+    </section>
+
+    <section class="dashboard-grid">
+
+      <div class="panel chat-panel">
+
+        <div class="panel-header">
+          <div>
+            <h2>المساعد الذكي</h2>
+            <p>تحدث مع مدير الأعمال لإنشاء المهام وإدارتها.</p>
+          </div>
         </div>
 
-        <nav class="nav">
-
-            <button class="nav-item active" data-section="dashboard">
-                <span>⌂</span>
-                <span>الرئيسية</span>
-            </button>
-
-            <button class="nav-item" data-section="projects">
-                <span>▣</span>
-                <span>المشاريع</span>
-            </button>
-
-            <button class="nav-item" data-section="cards">
-                <span>◉</span>
-                <span>بطاقات العمل</span>
-            </button>
-
-            <button class="nav-item" data-section="browser">
-                <span>◌</span>
-                <span>المتصفح</span>
-            </button>
-
-            <button class="nav-item" data-section="code">
-                <span>{ }</span>
-                <span>تحليل الكود</span>
-            </button>
-
-            <button class="nav-item" data-section="secrets">
-                <span>◆</span>
-                <span>اللوحة السرية</span>
-            </button>
-
-            <button class="nav-item" data-section="events">
-                <span>◷</span>
-                <span>سجل الأحداث</span>
-            </button>
-
-        </nav>
-
-        <div class="sidebar-bottom">
-
-            <div class="connection-box">
-                <span id="connectionDot" class="status-dot online"></span>
-
-                <div>
-                    <strong id="connectionText">متصل</strong>
-                    <small>حالة النظام</small>
-                </div>
+        <div id="chatMessages" class="chat-messages">
+          <div class="chat-message assistant">
+            <div class="message-content">
+              مرحباً بك. كيف يمكنني مساعدتك اليوم؟
             </div>
-
-            <button id="logoutBtn" class="logout-btn">
-                تسجيل الخروج
-            </button>
-
+          </div>
         </div>
 
-    </aside>
+        <form id="chatForm" class="chat-form">
 
+          <textarea
+            id="chatInput"
+            rows="2"
+            placeholder="اكتب طلبك هنا..."
+            required
+          ></textarea>
 
-    <main class="main">
+          <button type="submit" id="chatSendBtn">
+            إرسال
+          </button>
 
-        <header class="topbar">
+        </form>
 
-            <div>
-                <h1 id="pageTitle">الرئيسية</h1>
-                <p id="pageSubtitle">
-                    أهلاً بك. النظام جاهز لإدارة أعمالك.
-                </p>
-            </div>
+      </div>
 
-            <div class="top-actions">
+      <div class="panel">
 
-                <button
-                    id="refreshBtn"
-                    class="icon-btn"
-                    title="تحديث"
-                >
-                    ↻
-                </button>
+        <div class="panel-header">
+          <div>
+            <h2>المشاريع</h2>
+            <p>إدارة مشاريعك ومسارات العمل.</p>
+          </div>
 
-                <div class="system-badge">
-                    <span class="status-dot online"></span>
-                    النظام يعمل
-                </div>
-
-            </div>
-
-        </header>
-
-
-        <div class="content">
-
-
-            <!-- Dashboard -->
-
-            <section
-                id="section-dashboard"
-                class="section active"
-            >
-
-                <div class="hero-card">
-
-                    <div>
-                        <span class="eyebrow">
-                            Autonomous Business Manager
-                        </span>
-
-                        <h2>
-                            مركز التحكم في أعمالك
-                        </h2>
-
-                        <p>
-                            أنشئ المشاريع، راقب المهام، تحدث مع الوكيل،
-                            واستخدم الأتمتة من مكان واحد.
-                        </p>
-                    </div>
-
-                    <div class="hero-symbol">
-                        ◈
-                    </div>
-
-                </div>
-
-
-                <div class="stats-grid">
-
-                    <div class="stat-card">
-                        <span>المشاريع</span>
-                        <strong id="statProjects">0</strong>
-                    </div>
-
-                    <div class="stat-card">
-                        <span>بطاقات العمل</span>
-                        <strong id="statCards">0</strong>
-                    </div>
-
-                    <div class="stat-card">
-                        <span>قيد التنفيذ</span>
-                        <strong id="statRunning">0</strong>
-                    </div>
-
-                    <div class="stat-card">
-                        <span>تحتاج موافقة</span>
-                        <strong id="statApproval">0</strong>
-                    </div>
-
-                </div>
-
-
-                <div class="dashboard-grid">
-
-                    <div class="panel chat-panel">
-
-                        <div class="panel-header">
-
-                            <div>
-                                <h3>محادثة الوكيل</h3>
-                                <p>اكتب ما تريد من النظام.</p>
-                            </div>
-
-                            <span class="ai-badge">
-                                AI
-                            </span>
-
-                        </div>
-
-
-                        <div
-                            id="chatMessages"
-                            class="chat-messages"
-                        >
-
-                            <div class="chat-message assistant">
-                                <div class="message-avatar">
-                                    AI
-                                </div>
-
-                                <div class="message-content">
-                                    أهلاً بك. أخبرني بما تريد تنفيذه.
-                                </div>
-                            </div>
-
-                        </div>
-
-
-                        <div class="chat-input-row">
-
-                            <select id="chatWorkflow">
-                                <option value="assistant">
-                                    مساعد عام
-                                </option>
-
-                                <option value="api_account">
-                                    API / حساب
-                                </option>
-
-                                <option value="upload_design">
-                                    رفع / تصميم
-                                </option>
-
-                                <option value="code_api">
-                                    كود + API
-                                </option>
-
-                                <option value="dual">
-                                    سير عمل مزدوج
-                                </option>
-                            </select>
-
-                            <input
-                                id="chatInput"
-                                type="text"
-                                placeholder="اكتب طلبك هنا..."
-                                autocomplete="off"
-                            >
-
-                            <button
-                                id="sendChatBtn"
-                                class="primary-btn"
-                            >
-                                إرسال
-                            </button>
-
-                        </div>
-
-                    </div>
-
-
-                    <div class="panel">
-
-                        <div class="panel-header">
-
-                            <div>
-                                <h3>آخر بطاقات العمل</h3>
-                                <p>المهام التي تحتاج انتباهك.</p>
-                            </div>
-
-                        </div>
-
-                        <div
-                            id="dashboardCards"
-                            class="cards-list"
-                        ></div>
-
-                    </div>
-
-                </div>
-
-            </section>
-
-
-            <!-- Projects -->
-
-            <section
-                id="section-projects"
-                class="section"
-            >
-
-                <div class="section-heading">
-
-                    <div>
-                        <h2>المشاريع</h2>
-                        <p>
-                            أنشئ مشروعاً جديداً وحدد نوع سير العمل.
-                        </p>
-                    </div>
-
-                    <button
-                        id="newProjectBtn"
-                        class="primary-btn"
-                    >
-                        + مشروع جديد
-                    </button>
-
-                </div>
-
-
-                <div
-                    id="projectsList"
-                    class="projects-grid"
-                ></div>
-
-            </section>
-
-
-            <!-- Work Cards -->
-
-            <section
-                id="section-cards"
-                class="section"
-            >
-
-                <div class="section-heading">
-
-                    <div>
-                        <h2>بطاقات العمل</h2>
-                        <p>
-                            الموافقات، التنفيذ، الأخطاء والخطوة التالية.
-                        </p>
-                    </div>
-
-                </div>
-
-                <div
-                    id="allCardsList"
-                    class="cards-grid"
-                ></div>
-
-            </section>
-
-
-            <!-- Browser -->
-
-            <section
-                id="section-browser"
-                class="section"
-            >
-
-                <div class="section-heading">
-
-                    <div>
-                        <h2>المتصفح الآلي</h2>
-
-                        <p>
-                            تحكم عادي عبر Playwright بدون تجاوز CAPTCHA
-                            أو وسائل الحماية.
-                        </p>
-                    </div>
-
-                </div>
-
-
-                <div class="panel browser-panel">
-
-                    <div class="form-grid">
-
-                        <label>
-                            المشروع
-                            <select id="browserProject"></select>
-                        </label>
-
-                        <label>
-                            اسم الموقع
-                            <input
-                                id="browserSite"
-                                placeholder="example"
-                            >
-                        </label>
-
-                        <label class="full">
-                            الرابط
-                            <input
-                                id="browserUrl"
-                                type="url"
-                                placeholder="https://example.com"
-                            >
-                        </label>
-
-                    </div>
-
-
-                    <div class="button-row">
-
-                        <button
-                            id="browserOpenBtn"
-                            class="primary-btn"
-                        >
-                            فتح جلسة
-                        </button>
-
-                        <button
-                            id="browserNavigateBtn"
-                            class="secondary-btn"
-                        >
-                            انتقال
-                        </button>
-
-                        <button
-                            id="browserStatusBtn"
-                            class="secondary-btn"
-                        >
-                            فحص الجلسة
-                        </button>
-
-                        <button
-                            id="browserCloseBtn"
-                            class="danger-btn"
-                        >
-                            إغلاق
-                        </button>
-
-                    </div>
-
-
-                    <pre
-                        id="browserOutput"
-                        class="output-box"
-                    >لم يتم تشغيل جلسة بعد.</pre>
-
-                </div>
-
-            </section>
-
-
-            <!-- Code -->
-
-            <section
-                id="section-code"
-                class="section"
-            >
-
-                <div class="section-heading">
-
-                    <div>
-                        <h2>تحليل الكود</h2>
-                        <p>
-                            فحص ثابت قبل السماح بأي سير عمل برمجي.
-                        </p>
-                    </div>
-
-                </div>
-
-
-                <div class="panel">
-
-                    <div class="form-grid">
-
-                        <label>
-                            اسم الملف
-                            <input
-                                id="codeFilename"
-                                value="strategy.py"
-                            >
-                        </label>
-
-                    </div>
-
-
-                    <label>
-                        الكود
-                        <textarea
-                            id="codeInput"
-                            class="code-editor"
-                            spellcheck="false"
-                            placeholder="ألصق الكود هنا..."
-                        ></textarea>
-                    </label>
-
-
-                    <button
-                        id="analyzeCodeBtn"
-                        class="primary-btn"
-                    >
-                        تحليل الكود
-                    </button>
-
-
-                    <pre
-                        id="codeOutput"
-                        class="output-box"
-                    >النتائج ستظهر هنا.</pre>
-
-                </div>
-
-            </section>
-
-
-            <!-- Secrets -->
-
-            <section
-                id="section-secrets"
-                class="section"
-            >
-
-                <div class="section-heading">
-
-                    <div>
-                        <h2>اللوحة السرية</h2>
-
-                        <p>
-                            مفاتيح API والمعلومات الحساسة محفوظة مشفرة.
-                        </p>
-                    </div>
-
-                </div>
-
-
-                <div
-                    id="secretLock"
-                    class="panel"
-                >
-
-                    <h3>اللوحة مقفلة</h3>
-
-                    <p>
-                        أدخل كلمة مرور اللوحة السرية للمتابعة.
-                    </p>
-
-                    <div class="inline-form">
-
-                        <input
-                            id="panelPassword"
-                            type="password"
-                            placeholder="كلمة المرور"
-                        >
-
-                        <button
-                            id="verifyPanelBtn"
-                            class="primary-btn"
-                        >
-                            فتح
-                        </button>
-
-                    </div>
-
-                </div>
-
-
-                <div
-                    id="secretContent"
-                    class="panel hidden"
-                >
-
-                    <div class="form-grid">
-
-                        <label>
-                            اسم السر
-                            <input
-                                id="secretName"
-                                placeholder="OPENAI_API_KEY"
-                            >
-                        </label>
-
-                        <label>
-                            المشروع
-                            <select id="secretProject"></select>
-                        </label>
-
-                        <label class="full">
-                            القيمة
-                            <input
-                                id="secretValue"
-                                type="password"
-                                placeholder="القيمة السرية"
-                            >
-                        </label>
-
-                    </div>
-
-                    <button
-                        id="saveSecretBtn"
-                        class="primary-btn"
-                    >
-                        حفظ مشفر
-                    </button>
-
-                    <div
-                        id="secretMessage"
-                        class="form-message"
-                    ></div>
-
-                </div>
-
-            </section>
-
-
-            <!-- Events -->
-
-            <section
-                id="section-events"
-                class="section"
-            >
-
-                <div class="section-heading">
-
-                    <div>
-                        <h2>سجل الأحداث</h2>
-                        <p>
-                            اتصال، أخطاء، موافقات وتنبيهات النظام.
-                        </p>
-                    </div>
-
-                    <button
-                        id="refreshEventsBtn"
-                        class="secondary-btn"
-                    >
-                        تحديث
-                    </button>
-
-                </div>
-
-
-                <div class="panel">
-
-                    <div
-                        id="eventsList"
-                        class="events-list"
-                    ></div>
-
-                </div>
-
-            </section>
-
+          <button id="newProjectBtn" class="primary-btn">
+            مشروع جديد
+          </button>
         </div>
 
-    </main>
-
-</div>
-
-
-<!-- Project Modal -->
-
-<div
-    id="projectModal"
-    class="modal hidden"
->
-
-    <div class="modal-box">
-
-        <div class="modal-header">
-
-            <h3>إنشاء مشروع</h3>
-
-            <button
-                id="closeProjectModal"
-                class="modal-close"
-            >
-                ×
-            </button>
-
+        <div id="projectsList" class="list">
+          <div class="empty-state">
+            لا توجد مشاريع حالياً.
+          </div>
         </div>
 
+      </div>
 
-        <label>
-            اسم المشروع
-            <input
-                id="projectName"
-                placeholder="مثال: متجر POD"
-            >
-        </label>
+    </section>
 
+    <section class="panel">
 
-        <label>
-            الوصف
-            <textarea
-                id="projectDescription"
-                placeholder="وصف المشروع..."
-            ></textarea>
-        </label>
+      <div class="panel-header">
+        <div>
+          <h2>بطاقات العمل</h2>
+          <p>
+            المهام التي ينفذها النظام مع التحكم البشري والموافقات.
+          </p>
+        </div>
+      </div>
 
+      <div id="workCardsList" class="cards-list">
+        <div class="empty-state">
+          لا توجد بطاقات عمل.
+        </div>
+      </div>
 
-        <label>
-            نوع سير العمل
-            <select id="projectWorkflow">
+    </section>
 
-                <option value="assistant">
-                    مساعد عام
-                </option>
+    <section class="dashboard-grid">
 
-                <option value="api_account">
-                    API / حساب
-                </option>
+      <div class="panel">
 
-                <option value="upload_design">
-                    رفع / تصميم
-                </option>
+        <div class="panel-header">
+          <div>
+            <h2>المتصفح</h2>
+            <p>
+              تحكم آمن بالجلسات باستخدام Playwright.
+            </p>
+          </div>
+        </div>
 
-                <option value="code_api">
-                    كود + API
-                </option>
+        <div class="form-grid">
 
-                <option value="dual">
-                    سير عمل مزدوج
-                </option>
-
+          <label>
+            المشروع
+            <select id="browserProject">
+              <option value="">اختر المشروع</option>
             </select>
-        </label>
+          </label>
 
-
-        <div class="modal-actions">
-
-            <button
-                id="cancelProjectBtn"
-                class="secondary-btn"
+          <label>
+            الرابط
+            <input
+              id="browserUrl"
+              type="url"
+              placeholder="https://example.com"
             >
-                إلغاء
-            </button>
-
-            <button
-                id="createProjectBtn"
-                class="primary-btn"
-            >
-                إنشاء
-            </button>
+          </label>
 
         </div>
+
+        <div class="button-row">
+
+          <button
+            id="browserOpenBtn"
+            class="primary-btn"
+          >
+            فتح
+          </button>
+
+          <button
+            id="browserNavigateBtn"
+            class="secondary-btn"
+          >
+            انتقال
+          </button>
+
+          <button
+            id="browserStatusBtn"
+            class="secondary-btn"
+          >
+            الحالة
+          </button>
+
+          <button
+            id="browserCloseBtn"
+            class="danger-btn"
+          >
+            إغلاق
+          </button>
+
+        </div>
+
+        <div id="browserResult" class="result-box">
+          لا توجد جلسة متصفح نشطة.
+        </div>
+
+      </div>
+
+      <div class="panel">
+
+        <div class="panel-header">
+          <div>
+            <h2>تحليل الكود</h2>
+            <p>
+              فحص ثابت للكود قبل السماح باستخدامه.
+            </p>
+          </div>
+        </div>
+
+        <textarea
+          id="codeInput"
+          class="code-input"
+          rows="10"
+          placeholder="ألصق الكود هنا للتحليل..."
+        ></textarea>
+
+        <button
+          id="analyzeCodeBtn"
+          class="primary-btn full-width"
+        >
+          تحليل الكود
+        </button>
+
+        <div id="codeResult" class="result-box">
+          لم يتم إجراء تحليل بعد.
+        </div>
+
+      </div>
+
+    </section>
+
+    <section class="dashboard-grid">
+
+      <div class="panel">
+
+        <div class="panel-header">
+          <div>
+            <h2>لوحة الأسرار</h2>
+            <p>
+              مفاتيح API والمعلومات الحساسة مشفرة ولا تظهر نصاً.
+            </p>
+          </div>
+        </div>
+
+        <form id="secretForm">
+
+          <input
+            id="secretPanelPassword"
+            type="password"
+            placeholder="كلمة مرور لوحة الأسرار"
+            required
+          >
+
+          <button
+            type="submit"
+            class="primary-btn full-width"
+          >
+            فتح اللوحة
+          </button>
+
+        </form>
+
+        <div id="secretResult" class="result-box">
+          اللوحة مقفلة.
+        </div>
+
+      </div>
+
+      <div class="panel">
+
+        <div class="panel-header">
+          <div>
+            <h2>الأحداث</h2>
+            <p>آخر عمليات النظام والتنبيهات.</p>
+          </div>
+        </div>
+
+        <div id="eventsList" class="events-list">
+          <div class="empty-state">
+            لا توجد أحداث.
+          </div>
+        </div>
+
+      </div>
+
+    </section>
+
+  </main>
+
+  <div id="projectModal" class="modal hidden">
+
+    <div class="modal-content">
+
+      <div class="modal-header">
+        <h2>إنشاء مشروع</h2>
+
+        <button
+          id="closeProjectModal"
+          class="icon-btn"
+          type="button"
+        >
+          ×
+        </button>
+      </div>
+
+      <form id="projectForm">
+
+        <label>
+          اسم المشروع
+          <input
+            id="projectName"
+            required
+            maxlength="120"
+            placeholder="مثال: مشروع التصميم"
+          >
+        </label>
+
+        <label>
+          الوصف
+          <textarea
+            id="projectDescription"
+            rows="4"
+            maxlength="2000"
+            placeholder="وصف مختصر للمشروع..."
+          ></textarea>
+        </label>
+
+        <label>
+          نوع سير العمل
+
+          <select id="projectWorkflow">
+
+            <option value="assistant">
+              مساعد ذكي
+            </option>
+
+            <option value="api_account">
+              API / حساب
+            </option>
+
+            <option value="upload_design">
+              رفع / تصميم / POD
+            </option>
+
+            <option value="code_api">
+              كود + API
+            </option>
+
+            <option value="dual">
+              سير عمل مزدوج
+            </option>
+
+          </select>
+
+        </label>
+
+        <div class="button-row">
+
+          <button
+            type="submit"
+            class="primary-btn"
+          >
+            إنشاء المشروع
+          </button>
+
+          <button
+            id="cancelProjectBtn"
+            type="button"
+            class="secondary-btn"
+          >
+            إلغاء
+          </button>
+
+        </div>
+
+      </form>
 
     </div>
 
-</div>
+  </div>
 
+  <div id="toast" class="toast"></div>
 
-<div
-    id="toast"
-    class="toast"
-></div>
-
-
-<script src="/static/app.js"></script>
+  <script src="/static/app.js"></script>
 
 </body>
-  </html>
+    </html>
