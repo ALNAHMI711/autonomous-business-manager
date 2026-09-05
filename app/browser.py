@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-import asyncio
+import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from playwright.async_api import (
     Browser,
     BrowserContext,
+    ElementHandle,
     Page,
     Playwright,
     TimeoutError as PlaywrightTimeoutError,
@@ -15,524 +17,438 @@ from playwright.async_api import (
 
 from .config import Settings
 from .database import Database
-from .models import EventType, WorkStatus
 
 
 class BrowserManager:
     """
-    مدير متصفح آمن باستخدام Playwright.
+    مدير المتصفح باستخدام Playwright.
 
-    يستخدم تفاعلات المتصفح الطبيعية فقط.
-
-    لا يقوم بـ:
-    - تجاوز CAPTCHA
-    - تزوير البصمة الرقمية
-    - تجاوز حدود المعدل
-    - تجاوز المصادقة
-    - تعطيل أنظمة مكافحة الروبوتات
+    الحدود الأمنية:
+    - لا يتجاوز CAPTCHA.
+    - لا يتجاوز أنظمة مكافحة الروبوتات.
+    - لا يزوّر بصمة المتصفح.
+    - لا يتجاوز حدود المعدل أو أنظمة الدخول.
+    - لا ينفذ JavaScript عشوائياً من المستخدم.
+    - يستخدم جلسات متصفح مستقلة لكل مشروع/موقع.
     """
 
-    def __init__(
-        self,
-        settings: Settings,
-        database: Database,
-    ):
+    SESSION_EXPIRED_MARKERS = (
+        "/login",
+        "/signin",
+        "/sign-in",
+        "/auth/login",
+        "/authenticate",
+        "session-expired",
+        "reauth",
+    )
+
+    def __init__(self, settings: Settings, database: Database) -> None:
         self.settings = settings
-        self.database = database
+        self.db = database
 
-        self.playwright: Playwright | None = None
-        self.browser: Browser | None = None
+        self._playwright: Playwright | None = None
+        self._browser: Browser | None = None
+        self._contexts: dict[int, BrowserContext] = {}
+        self._pages: dict[int, Page] = {}
 
-        self.contexts: dict[int, BrowserContext] = {}
-        self.pages: dict[int, Page] = {}
-        self.session_ids: dict[int, int] = {}
-
-        self._lock = asyncio.Lock()
-
-    async def start(self) -> None:
-        if self.playwright is not None:
+    async def initialize(self) -> None:
+        if self._playwright is not None:
             return
 
-        self.playwright = await async_playwright().start()
+        self._playwright = await async_playwright().start()
 
-        self.browser = await self.playwright.chromium.launch(
-            headless=self.settings.browser_headless,
+        self._browser = await self._playwright.chromium.launch(
+            headless=self.settings.browser_headless
         )
 
-    async def stop(self) -> None:
-        async with self._lock:
-            for context in list(self.contexts.values()):
-                try:
-                    await context.close()
-                except Exception:
-                    pass
-
-            self.contexts.clear()
-            self.pages.clear()
-            self.session_ids.clear()
-
-            if self.browser:
-                try:
-                    await self.browser.close()
-                except Exception:
-                    pass
-
-            self.browser = None
-
-            if self.playwright:
-                try:
-                    await self.playwright.stop()
-                except Exception:
-                    pass
-
-            self.playwright = None
-
-    async def open_session(
-        self,
-        project_id: int,
-        site_name: str,
-        url: str,
-    ) -> Page:
-        if not self._is_safe_url(url):
-            raise ValueError("URL غير مسموح به.")
-
-        await self.start()
-
-        if not self.browser:
-            raise RuntimeError("Browser is not available.")
-
-        session_dir = (
-            Path(self.settings.upload_dir).parent
-            / "browser_profiles"
-            / str(project_id)
-            / self._safe_name(site_name)
-        )
-
-        session_dir.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        storage_file = session_dir / "storage_state.json"
-
-        context = await self.browser.new_context(
-            storage_state=(
-                str(storage_file)
-                if storage_file.exists()
-                else None
-            ),
-            viewport={
-                "width": 1440,
-                "height": 900,
-            },
-        )
-
-        context.set_default_timeout(
-            self.settings.browser_timeout_ms
-        )
-
-        page = await context.new_page()
-
-        session_id = self.database.create_browser_session(
-            site_name=site_name,
-            project_id=project_id,
-            storage_path=str(storage_file),
-        )
-
-        self.contexts[project_id] = context
-        self.pages[project_id] = page
-        self.session_ids[project_id] = session_id
-
-        try:
-            await page.goto(
-                url,
-                wait_until="domcontentloaded",
-            )
-
-            await self._save_storage_state(project_id)
-
-            self.database.update_browser_session(
-                session_id,
-                "active",
-            )
-
-            return page
-
-        except PlaywrightTimeoutError as exc:
-            self.database.update_browser_session(
-                session_id,
-                "connection_timeout",
-            )
-
-            self.database.add_event(
-                event_type=EventType.CONNECTION_LOST.value,
-                message="Browser navigation timed out.",
-                project_id=project_id,
-            )
-
-            raise RuntimeError(
-                "انتهت مهلة الاتصال بالموقع."
-            ) from exc
-
-        except Exception as exc:
-            self.database.update_browser_session(
-                session_id,
-                "error",
-            )
-
-            self.database.add_event(
-                event_type=EventType.ERROR.value,
-                message=(
-                    f"Browser session error: "
-                    f"{type(exc).__name__}"
-                ),
-                project_id=project_id,
-            )
-
-            raise
-
-    async def get_page(
-        self,
-        project_id: int,
-    ) -> Page | None:
-        return self.pages.get(project_id)
-
-    async def save_session(
-        self,
-        project_id: int,
-    ) -> None:
-        await self._save_storage_state(project_id)
-
-    async def close_session(
-        self,
-        project_id: int,
-    ) -> None:
-        context = self.contexts.pop(
-            project_id,
-            None,
-        )
-
-        self.pages.pop(
-            project_id,
-            None,
-        )
-
-        session_id = self.session_ids.pop(
-            project_id,
-            None,
-        )
-
-        if context:
+    async def shutdown(self) -> None:
+        for project_id in list(self._contexts):
             try:
-                await context.close()
+                await self.close_project(project_id)
             except Exception:
                 pass
 
-        if session_id:
-            self.database.update_browser_session(
-                session_id,
-                "closed",
+        if self._browser is not None:
+            try:
+                await self._browser.close()
+            except Exception:
+                pass
+            self._browser = None
+
+        if self._playwright is not None:
+            try:
+                await self._playwright.stop()
+            except Exception:
+                pass
+            self._playwright = None
+
+    def _safe_site_name(self, site: str) -> str:
+        parsed = urlparse(site)
+
+        hostname = parsed.hostname or "unknown-site"
+        hostname = re.sub(r"[^a-zA-Z0-9._-]", "_", hostname)
+
+        return hostname[:100]
+
+    def _profile_path(self, project_id: int, site: str) -> Path:
+        safe_site = self._safe_site_name(site)
+
+        path = (
+            Path("browser_profiles")
+            / str(project_id)
+            / safe_site
+        )
+
+        path.mkdir(parents=True, exist_ok=True)
+
+        return path
+
+    def _validate_url(self, url: str) -> str:
+        parsed = urlparse(url)
+
+        if parsed.scheme == "https":
+            return url
+
+        if parsed.scheme == "http" and parsed.hostname in {
+            "127.0.0.1",
+            "localhost",
+        }:
+            return url
+
+        raise ValueError(
+            "لأسباب أمنية يسمح النظام بروابط HTTPS فقط، "
+            "أو HTTP للمضيف المحلي."
+        )
+
+    async def open_project(
+        self,
+        project_id: int,
+        site: str,
+    ) -> dict[str, Any]:
+        await self.initialize()
+
+        if self._browser is None:
+            raise RuntimeError("المتصفح غير متاح.")
+
+        site = self._validate_url(site)
+
+        existing = self._contexts.get(project_id)
+
+        if existing is not None:
+            pages = existing.pages
+
+            if pages:
+                page = pages[0]
+            else:
+                page = await existing.new_page()
+
+            self._pages[project_id] = page
+
+            return {
+                "project_id": project_id,
+                "url": page.url,
+                "status": "connected",
+            }
+
+        profile_path = self._profile_path(project_id, site)
+
+        storage_state = profile_path / "storage_state.json"
+
+        context_kwargs: dict[str, Any] = {
+            "viewport": {
+                "width": 1440,
+                "height": 900,
+            },
+            "locale": "ar-SA",
+        }
+
+        if storage_state.exists():
+            context_kwargs["storage_state"] = str(storage_state)
+
+        context = await self._browser.new_context(**context_kwargs)
+
+        page = await context.new_page()
+
+        self._contexts[project_id] = context
+        self._pages[project_id] = page
+
+        try:
+            await page.goto(
+                site,
+                wait_until="domcontentloaded",
+                timeout=self.settings.browser_timeout_ms,
             )
+        except PlaywrightTimeoutError:
+            # الصفحة قد تكون وصلت فعلياً رغم انتهاء مهلة الانتظار.
+            pass
+
+        await self._save_storage_state(project_id, site)
+
+        return {
+            "project_id": project_id,
+            "url": page.url,
+            "status": "connected",
+            "session_expired": self.is_session_expired(page.url),
+        }
 
     async def navigate(
         self,
         project_id: int,
         url: str,
     ) -> dict[str, Any]:
-        if not self._is_safe_url(url):
-            raise ValueError("URL غير مسموح به.")
+        url = self._validate_url(url)
 
-        page = self.pages.get(project_id)
+        page = self._pages.get(project_id)
 
-        if not page:
-            raise RuntimeError(
-                "لا توجد جلسة متصفح لهذا المشروع."
+        if page is None:
+            raise ValueError(
+                "لا توجد جلسة متصفح للمشروع. افتح المشروع أولاً."
             )
 
         try:
-            response = await page.goto(
+            await page.goto(
                 url,
                 wait_until="domcontentloaded",
+                timeout=self.settings.browser_timeout_ms,
             )
-
-            await self._save_storage_state(project_id)
-
-            return {
-                "success": True,
-                "status": (
-                    response.status
-                    if response
-                    else None
-                ),
-                "url": page.url,
-            }
-
         except PlaywrightTimeoutError:
-            await self._pause_project(
-                project_id,
-                "انتهت مهلة الاتصال بالموقع.",
-            )
+            pass
 
-            return {
-                "success": False,
-                "status": "timeout",
-                "paused": True,
-            }
+        site = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
 
-        except Exception as exc:
-            await self._pause_project(
-                project_id,
-                f"فشل الاتصال بالموقع: "
-                f"{type(exc).__name__}",
-            )
+        await self._save_storage_state(project_id, site)
 
-            return {
-                "success": False,
-                "status": "error",
-                "paused": True,
-            }
-
-    async def inspect_page(
-        self,
-        project_id: int,
-    ) -> dict[str, Any]:
-        page = self.pages.get(project_id)
-
-        if not page:
-            raise RuntimeError(
-                "لا توجد جلسة متصفح."
-            )
+        expired = self.is_session_expired(page.url)
 
         return {
+            "project_id": project_id,
             "url": page.url,
-            "title": await page.title(),
+            "session_expired": expired,
+            "status": "needs_reauth" if expired else "connected",
         }
 
-    async def check_session(
-        self,
-        project_id: int,
-    ) -> dict[str, Any]:
-        page = self.pages.get(project_id)
+    async def get_status(self, project_id: int) -> dict[str, Any]:
+        page = self._pages.get(project_id)
 
-        if not page:
+        if page is None:
             return {
-                "active": False,
-                "reason": "no_browser_session",
+                "project_id": project_id,
+                "status": "closed",
+                "url": None,
+                "session_expired": False,
             }
 
         try:
-            await page.title()
-
-            url = page.url.lower()
-
-            session_expired = any(
-                marker in url
-                for marker in (
-                    "login",
-                    "signin",
-                    "sign-in",
-                    "authenticate",
-                    "reauth",
-                )
-            )
-
-            if session_expired:
-                await self._mark_reauth(project_id)
-
-                return {
-                    "active": False,
-                    "reason": "session_expired",
-                }
-
-            return {
-                "active": True,
-                "reason": "active",
-                "url": page.url,
-            }
-
+            url = page.url
         except Exception:
-            await self._mark_reauth(project_id)
+            url = None
 
-            return {
-                "active": False,
-                "reason": "session_check_failed",
-            }
+        expired = self.is_session_expired(url or "")
+
+        return {
+            "project_id": project_id,
+            "status": "needs_reauth" if expired else "connected",
+            "url": url,
+            "session_expired": expired,
+        }
+
+    async def close_project(self, project_id: int) -> None:
+        context = self._contexts.pop(project_id, None)
+        self._pages.pop(project_id, None)
+
+        if context is None:
+            return
+
+        try:
+            await context.close()
+        except Exception:
+            pass
 
     async def click(
         self,
         project_id: int,
         selector: str,
-    ) -> None:
-        page = self.pages.get(project_id)
+    ) -> dict[str, Any]:
+        page = self._get_page(project_id)
 
-        if not page:
-            raise RuntimeError(
-                "لا توجد جلسة متصفح."
-            )
+        await page.locator(selector).click(
+            timeout=self.settings.browser_timeout_ms
+        )
 
-        await page.locator(selector).click()
+        await page.wait_for_load_state(
+            "domcontentloaded",
+            timeout=self.settings.browser_timeout_ms,
+        )
 
-        await self._save_storage_state(project_id)
+        expired = self.is_session_expired(page.url)
+
+        return {
+            "project_id": project_id,
+            "url": page.url,
+            "session_expired": expired,
+            "status": "needs_reauth" if expired else "ok",
+        }
 
     async def fill(
         self,
         project_id: int,
         selector: str,
         value: str,
-    ) -> None:
-        page = self.pages.get(project_id)
+    ) -> dict[str, Any]:
+        page = self._get_page(project_id)
 
-        if not page:
-            raise RuntimeError(
-                "لا توجد جلسة متصفح."
-            )
+        await page.locator(selector).fill(
+            value,
+            timeout=self.settings.browser_timeout_ms,
+        )
 
-        await page.locator(selector).fill(value)
+        return {
+            "project_id": project_id,
+            "status": "ok",
+        }
 
-    async def press(
+    async def get_text(
         self,
         project_id: int,
         selector: str,
-        key: str,
-    ) -> None:
-        page = self.pages.get(project_id)
+    ) -> str:
+        page = self._get_page(project_id)
 
-        if not page:
-            raise RuntimeError(
-                "لا توجد جلسة متصفح."
-            )
-
-        await page.locator(selector).press(key)
-
-    async def _save_storage_state(
-        self,
-        project_id: int,
-    ) -> None:
-        context = self.contexts.get(project_id)
-
-        session_id = self.session_ids.get(project_id)
-
-        session = (
-            self.database.get_browser_session(session_id)
-            if session_id
-            else None
+        return await page.locator(selector).inner_text(
+            timeout=self.settings.browser_timeout_ms
         )
 
-        if not context or not session:
-            return
+    async def screenshot(
+        self,
+        project_id: int,
+        path: str,
+    ) -> str:
+        page = self._get_page(project_id)
 
-        storage_path = session.get("storage_path")
+        output = Path(path)
 
-        if not storage_path:
-            return
-
-        path = Path(storage_path)
-
-        path.parent.mkdir(
+        output.parent.mkdir(
             parents=True,
             exist_ok=True,
         )
 
-        await context.storage_state(
-            path=str(path)
+        await page.screenshot(
+            path=str(output),
+            full_page=True,
         )
 
-    async def _pause_project(
+        return str(output)
+
+    async def inspect_page(
         self,
         project_id: int,
-        reason: str,
-    ) -> None:
-        self.database.update_project_status(
-            project_id,
-            WorkStatus.PAUSED.value,
+    ) -> dict[str, Any]:
+        page = self._get_page(project_id)
+
+        title = await page.title()
+
+        url = page.url
+
+        text = await page.locator("body").inner_text(
+            timeout=self.settings.browser_timeout_ms
         )
 
-        self.database.execute_script(
-            f"""
-            UPDATE work_cards
-            SET status = 'paused',
-                error_message = 'connection_lost',
-                updated_at = CURRENT_TIMESTAMP
-            WHERE project_id = {int(project_id)}
-              AND status = 'running'
-            """
-        )
+        links = await page.locator("a").all()
 
-        self.database.add_event(
-            event_type=EventType.CONNECTION_LOST.value,
-            message=reason,
-            project_id=project_id,
-        )
+        link_data: list[dict[str, str]] = []
 
-        session_id = self.session_ids.get(project_id)
+        for link in links[:100]:
+            try:
+                text_value = (await link.inner_text()).strip()
+            except Exception:
+                text_value = ""
 
-        if session_id:
-            self.database.update_browser_session(
-                session_id,
-                "paused",
-            )
+            try:
+                href = await link.get_attribute("href")
+            except Exception:
+                href = None
 
-    async def _mark_reauth(
+            if text_value or href:
+                link_data.append(
+                    {
+                        "text": text_value[:300],
+                        "href": href or "",
+                    }
+                )
+
+        return {
+            "project_id": project_id,
+            "url": url,
+            "title": title,
+            "text": text[:20000],
+            "links": link_data,
+            "session_expired": self.is_session_expired(url),
+        }
+
+    async def _save_storage_state(
         self,
         project_id: int,
+        site: str,
     ) -> None:
-        self.database.update_project_status(
-            project_id,
-            WorkStatus.NEEDS_REAUTH.value,
-        )
+        context = self._contexts.get(project_id)
 
-        self.database.execute_script(
-            f"""
-            UPDATE work_cards
-            SET status = 'needs_reauth',
-                updated_at = CURRENT_TIMESTAMP
-            WHERE project_id = {int(project_id)}
-              AND status IN ('running', 'queued')
-            """
-        )
+        if context is None:
+            return
 
-        self.database.add_event(
-            event_type=EventType.SESSION_EXPIRED.value,
-            message=(
-                "Browser session expired. "
-                "Manual re-authentication required."
-            ),
-            project_id=project_id,
-        )
+        profile_path = self._profile_path(project_id, site)
 
-        session_id = self.session_ids.get(project_id)
+        storage_state = profile_path / "storage_state.json"
 
-        if session_id:
-            self.database.update_browser_session(
-                session_id,
-                "expired",
+        try:
+            await context.storage_state(
+                path=str(storage_state)
+            )
+        except Exception:
+            pass
+
+    def _get_page(self, project_id: int) -> Page:
+        page = self._pages.get(project_id)
+
+        if page is None:
+            raise ValueError(
+                "لا توجد صفحة متصفح نشطة لهذا المشروع."
             )
 
-    @staticmethod
-    def _safe_name(
-        value: str,
-    ) -> str:
-        allowed = (
-            "abcdefghijklmnopqrstuvwxyz"
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-            "0123456789_-"
-        )
+        return page
 
-        result = "".join(
-            char if char in allowed else "_"
-            for char in value
-        )
+    @classmethod
+    def is_session_expired(cls, url: str) -> bool:
+        if not url:
+            return False
 
-        return result[:80] or "site"
+        normalized = url.lower()
 
-    @staticmethod
-    def _is_safe_url(
-        url: str,
+        for marker in cls.SESSION_EXPIRED_MARKERS:
+            if marker in normalized:
+                return True
+
+        return False
+
+    async def detect_session_expiry(
+        self,
+        project_id: int,
     ) -> bool:
-        lowered = url.lower().strip()
+        page = self._pages.get(project_id)
 
-        return (
-            lowered.startswith("https://")
-            or lowered.startswith("http://localhost")
-            or lowered.startswith("http://127.0.0.1")
-            )
+        if page is None:
+            return False
+
+        return self.is_session_expired(page.url)
+
+    async def save_session(
+        self,
+        project_id: int,
+        site: str,
+    ) -> None:
+        await self._save_storage_state(
+            project_id,
+            site,
+        )
+
+    def active_projects(self) -> list[int]:
+        return list(self._contexts.keys())
