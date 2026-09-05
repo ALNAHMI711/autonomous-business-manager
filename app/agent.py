@@ -1,474 +1,574 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Optional
 
 import httpx
 
-from app.config import Settings
-from app.database import Database
+
+logger = logging.getLogger(__name__)
 
 
 class Agent:
     """
-    AI agent for the Autonomous Business Manager.
+    العقل المنطقي للنظام.
 
-    Design principles:
-    - Never executes arbitrary user code.
-    - Never bypasses CAPTCHA or authentication.
-    - Never attempts anti-detection or fingerprint spoofing.
-    - Sensitive actions must become approval-required work cards.
-    - Keeps a local fallback when no OpenAI API key is configured.
+    مسؤول عن:
+    - فهم طلب المستخدم.
+    - حفظ سياق المحادثة.
+    - اقتراح خطة العمل.
+    - إنشاء بطاقات العمل.
+    - استخدام OpenAI بشكل اختياري.
+    - العمل محلياً عند عدم توفر OpenAI.
+
+    مهم:
+    هذا الكلاس لا ينفذ أوامر Shell أو Python أو JavaScript
+    قادمة من المستخدم.
     """
+
+    SYSTEM_PROMPT = """
+أنت المساعد الذكي لنظام Autonomous Business Manager.
+
+مهمتك:
+1. فهم طلب المستخدم باللغة العربية أو الإنجليزية.
+2. تقسيم الأعمال المعقدة إلى خطوات واضحة.
+3. اقتراح بطاقات عمل منظمة.
+4. استخدام العمليات المسموح بها فقط.
+5. عدم تنفيذ كود Python أو Shell أو JavaScript يقدمه المستخدم مباشرة.
+6. عدم تجاوز CAPTCHA أو أنظمة الحماية.
+7. عدم محاولة سرقة أو استخراج بيانات اعتماد.
+8. عدم التحايل على حدود الاستخدام.
+9. العمليات الحساسة تحتاج موافقة المستخدم.
+10. عند وجود غموض أو مخاطرة، اطلب موافقة أو وضح المطلوب.
+
+عمليات المتصفح المنظمة المسموحة:
+- browser_open
+- browser_navigate
+- browser_click
+- browser_fill
+- browser_text
+- wait
+
+إذا احتاجت المهمة عملية خارج العمليات السابقة،
+لا تنفذها مباشرة، بل وضح أنها تحتاج تكاملاً مخصصاً وآمناً.
+"""
+
+    ALLOWED_OPERATIONS = {
+        "browser_open",
+        "browser_navigate",
+        "browser_click",
+        "browser_fill",
+        "browser_text",
+        "wait",
+    }
 
     def __init__(
         self,
-        database: Database,
-        settings: Settings,
-    ):
-        self.database = database
+        database,
+        settings,
+    ) -> None:
+        self.db = database
         self.settings = settings
 
-    def _system_prompt(self) -> str:
-        return """
-أنت المساعد الذكي داخل نظام Autonomous Business Manager.
+    # =========================================================
+    # Helpers
+    # =========================================================
 
-مهمتك:
-- مساعدة المستخدم في إدارة المشاريع والأعمال الرقمية.
-- تحليل الطلب وتحويل المهام العملية إلى خطوات واضحة وآمنة.
-- اقتراح workflows مناسبة.
-- عدم تنفيذ أي إجراء حساس بدون موافقة المستخدم.
-- حماية الأسرار والمفاتيح وكلمات المرور.
-- عدم طلب الأسرار الحساسة من المستخدم داخل المحادثة إذا كان النظام يستطيع تخزينها بشكل آمن.
+    @staticmethod
+    def _safe_json_loads(
+        value: Any,
+        default: Any,
+    ) -> Any:
+        if isinstance(value, (dict, list)):
+            return value
 
-قواعد السلامة:
-1. لا تتجاوز CAPTCHA.
-2. لا تتحايل على أنظمة مكافحة الروبوتات.
-3. لا تستخدم fingerprint spoofing أو وسائل إخفاء الهوية.
-4. لا تتحايل على rate limits.
-5. لا تتجاوز تسجيل الدخول أو المصادقة.
-6. لا تستخرج كلمات مرور أو session cookies أو رموز MFA من مواقع.
-7. لا تنفذ كوداً مرفوعاً من المستخدم بشكل أعمى.
-8. يجب تحليل الكود أولاً بشكل ثابت.
-9. لا تنفذ أوامر shell غير محدودة.
-10. أي عملية حساسة مثل النشر أو حذف البيانات أو تغيير الحسابات أو العمليات المالية يجب أن تتطلب موافقة صريحة.
-11. عند الحاجة إلى تسجيل دخول أو إعادة مصادقة، أوقف المهمة واطلب من المستخدم إكمال العملية يدوياً.
-12. إذا انقطع الإنترنت، يجب إيقاف العمليات القابلة للتنفيذ مؤقتاً واستئنافها بعد عودة الاتصال.
+        if not isinstance(value, str):
+            return default
 
-أسلوب الرد:
-- تحدث بالعربية عندما يتحدث المستخدم بالعربية.
-- كن واضحاً ومباشراً.
-- لا تدّعي تنفيذ شيء لم يتم تنفيذه فعلياً.
-- إذا كانت المهمة تحتاج موافقة، وضح ذلك.
-- إذا كانت المهمة غير آمنة، ارفض الجزء الخطير واقترح البديل الآمن.
-"""
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            return default
+
+    # =========================================================
+    # Local response
+    # =========================================================
 
     def _local_response(
         self,
         message: str,
-        project_id: Optional[int] = None,
     ) -> str:
+        """
+        استجابة محلية عند عدم توفر OpenAI.
+
+        لا تحاول تنفيذ الطلب مباشرة.
+        """
+
         text = message.strip()
+
+        if not text:
+            return (
+                "ارسل طلبك وسأساعدك في تحويله إلى خطوات "
+                "ومهام منظمة."
+            )
 
         lowered = text.lower()
 
         if any(
-            word in lowered
-            for word in (
-                "captcha",
-                "كابتشا",
-                "anti-detection",
-                "fingerprint",
-                "rate limit",
-                "تجاوز المصادقة",
+            keyword in lowered
+            for keyword in (
+                "password",
+                "كلمة المرور",
+                "كلمه المرور",
+                "api key",
+                "مفتاح api",
+                "secret",
             )
         ):
             return (
-                "لا أستطيع تنفيذ أو شرح طرق تجاوز CAPTCHA أو أنظمة "
-                "مكافحة الروبوتات أو المصادقة أو حدود الاستخدام. "
-                "يمكنني بدلاً من ذلك بناء سير عمل يعتمد على الواجهات "
-                "الرسمية أو التفاعل الطبيعي مع الموقع."
+                "يمكنني مساعدتك في تنظيم بيانات الاعتماد "
+                "وحفظها عبر لوحة الأسرار المشفرة، لكن لا ترسل "
+                "المفاتيح السرية داخل المحادثة أو تحفظها في GitHub."
             )
 
         if any(
-            word in text
-            for word in (
-                "انترنت",
-                "الإنترنت",
-                "اتصال",
+            keyword in lowered
+            for keyword in (
+                "browser",
+                "playwright",
+                "متصفح",
+                "موقع",
             )
         ):
             return (
-                "النظام يراقب الاتصال بالإنترنت. عند انقطاع الاتصال "
-                "يتم إيقاف الأعمال الجارية مؤقتاً، وعند عودة الاتصال "
-                "يمكن استئناف الأعمال التي توقفت بسبب الانقطاع."
-            )
-
-        if any(
-            word in text
-            for word in (
-                "مشروع",
-                "مشروعي",
-                "المشروع",
-            )
-        ):
-            projects = self.database.list_projects()
-
-            if not projects:
-                return (
-                    "لا توجد مشاريع حالياً. يمكنك إنشاء مشروع جديد "
-                    "من لوحة التحكم."
-                )
-
-            names = [
-                str(project.get("name", "بدون اسم"))
-                for project in projects[:10]
-            ]
-
-            return (
-                "المشاريع الحالية:\n- "
-                + "\n- ".join(names)
-            )
-
-        if any(
-            word in text
-            for word in (
-                "مساعدة",
-                "ساعدني",
-                "ماذا تستطيع",
-            )
-        ):
-            return (
-                "أستطيع مساعدتك في إدارة المشاريع، إنشاء بطاقات العمل، "
-                "تحليل الكود المرفوع، تشغيل إجراءات المتصفح الطبيعية، "
-                "ومراقبة الاتصال وحالة المهام. الإجراءات الحساسة "
-                "تحتاج موافقة قبل تنفيذها."
-            )
-
-        if project_id is not None:
-            return (
-                "استلمت طلبك ضمن المشروع رقم "
-                f"{project_id}. في الوضع المحلي الحالي لا يوجد مفتاح "
-                "OpenAI مهيأ، لذلك أستطيع تقديم الإرشادات الأساسية "
-                "وإدارة عناصر المشروع دون اتصال بالنموذج الخارجي."
+                "أستطيع تحويل طلب المتصفح إلى عمليات منظمة "
+                "مثل فتح الموقع والتنقل والضغط وملء الحقول "
+                "وقراءة النص، مع بقاء العمليات الحساسة تحت "
+                "موافقة المستخدم."
             )
 
         return (
-            "استلمت طلبك. النظام يعمل حالياً بالوضع المحلي لأن "
-            "مفتاح OpenAI غير مهيأ. يمكنك متابعة إدارة المشاريع "
-            "وتحليل الملفات والإجراءات الآمنة من لوحة التحكم."
+            "تم استلام طلبك. وضع الذكاء الاصطناعي الخارجي "
+            "غير مفعل حالياً، لذلك أستطيع العمل بالوضع المحلي "
+            "وتحويل الطلب إلى خطة أو بطاقة عمل منظمة."
         )
+
+    # =========================================================
+    # OpenAI
+    # =========================================================
 
     async def _call_openai(
         self,
         messages: list[dict[str, str]],
-    ) -> str:
-        api_key = self.settings.openai_api_key
+    ) -> Optional[str]:
+        api_key = getattr(
+            self.settings,
+            "openai_api_key",
+            None,
+        )
 
         if not api_key:
-            raise RuntimeError(
-                "OPENAI_API_KEY is not configured."
-            )
+            return None
 
-        url = "https://api.openai.com/v1/chat/completions"
-
-        payload = {
-            "model": self.settings.openai_model,
-            "messages": messages,
-            "temperature": 0.2,
-        }
+        model = getattr(
+            self.settings,
+            "openai_model",
+            "gpt-5.6",
+        )
 
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
 
-        timeout = max(
-            30.0,
-            float(self.settings.browser_timeout) / 1000,
-        )
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.2,
+        }
 
-        async with httpx.AsyncClient(
-            timeout=timeout,
-        ) as client:
-            response = await client.post(
-                url,
-                headers=headers,
-                json=payload,
+        try:
+            async with httpx.AsyncClient(
+                timeout=60.0
+            ) as client:
+
+                response = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                )
+
+                response.raise_for_status()
+
+                data = response.json()
+
+                choices = data.get(
+                    "choices",
+                    [],
+                )
+
+                if not choices:
+                    return None
+
+                message = choices[0].get(
+                    "message",
+                    {},
+                )
+
+                content = message.get(
+                    "content"
+                )
+
+                if not content:
+                    return None
+
+                return str(content).strip()
+
+        except Exception:
+            logger.exception(
+                "OpenAI request failed."
             )
+            return None
 
-        if response.status_code >= 400:
-            try:
-                error_data = response.json()
-            except Exception:
-                error_data = response.text
-
-            raise RuntimeError(
-                f"OpenAI API error: {error_data}"
-            )
-
-        data = response.json()
-
-        choices = data.get("choices", [])
-
-        if not choices:
-            raise RuntimeError(
-                "OpenAI API returned no choices."
-            )
-
-        message = choices[0].get("message", {})
-
-        content = message.get("content")
-
-        if not content:
-            raise RuntimeError(
-                "OpenAI API returned an empty response."
-            )
-
-        return str(content).strip()
+    # =========================================================
+    # Chat
+    # =========================================================
 
     async def chat(
         self,
         message: str,
         project_id: Optional[int] = None,
-    ) -> str:
-        message = message.strip()
+    ) -> dict[str, Any]:
 
-        if not message:
-            return "اكتب طلبك أولاً."
+        user_message = message.strip()
 
-        self.database.create_chat_message(
-            role="user",
-            content=message,
-            project_id=project_id,
-        )
-
-        history = self.database.list_chat_messages(
-            project_id=project_id,
-            limit=30,
-        )
-
-        messages: list[dict[str, str]] = [
-            {
-                "role": "system",
-                "content": self._system_prompt(),
+        if not user_message:
+            return {
+                "ok": False,
+                "response": "الرسالة فارغة.",
+                "source": "local",
             }
-        ]
 
-        for item in history:
-            role = item.get("role", "user")
-            content = item.get("content", "")
+        history: list[dict[str, str]] = []
 
-            if role not in {
-                "system",
-                "user",
-                "assistant",
-            }:
-                role = "user"
+        try:
+            rows = self.db.list_chat_messages(
+                project_id=project_id,
+                limit=30,
+            )
 
-            messages.append(
-                {
-                    "role": role,
-                    "content": str(content),
-                }
+            for row in rows:
+                role = str(
+                    row.get(
+                        "role",
+                        "user",
+                    )
+                )
+
+                content = str(
+                    row.get(
+                        "content",
+                        "",
+                    )
+                )
+
+                if role in {
+                    "system",
+                    "user",
+                    "assistant",
+                } and content:
+                    history.append(
+                        {
+                            "role": role,
+                            "content": content,
+                        }
+                    )
+
+        except Exception:
+            logger.exception(
+                "Unable to load chat history."
             )
 
         try:
-            if self.settings.openai_api_key:
-                response = await self._call_openai(
-                    messages=messages,
-                )
-            else:
-                response = self._local_response(
-                    message=message,
-                    project_id=project_id,
-                )
-
-        except Exception as exc:
-            response = (
-                "تعذر الاتصال بخدمة الذكاء الاصطناعي حالياً. "
-                "تم الرجوع إلى الوضع المحلي.\n\n"
-                + self._local_response(
-                    message=message,
-                    project_id=project_id,
-                )
+            self.db.create_chat_message(
+                project_id=project_id,
+                role="user",
+                content=user_message,
+            )
+        except Exception:
+            logger.exception(
+                "Unable to save user message."
             )
 
-            try:
-                self.database.create_event(
-                    event_type="warning",
-                    message=(
-                        "تعذر الاتصال بخدمة الذكاء الاصطناعي: "
-                        f"{type(exc).__name__}"
-                    ),
-                    project_id=project_id,
-                )
-            except Exception:
-                pass
+        messages = [
+            {
+                "role": "system",
+                "content": self.SYSTEM_PROMPT,
+            }
+        ]
 
-        self.database.create_chat_message(
-            role="assistant",
-            content=response,
-            project_id=project_id,
+        messages.extend(history)
+
+        messages.append(
+            {
+                "role": "user",
+                "content": user_message,
+            }
         )
 
-        return response
+        response = await self._call_openai(
+            messages
+        )
 
-    def create_work_card(
+        source = "openai"
+
+        if not response:
+            response = self._local_response(
+                user_message
+            )
+            source = "local"
+
+        try:
+            self.db.create_chat_message(
+                project_id=project_id,
+                role="assistant",
+                content=response,
+                metadata={
+                    "source": source,
+                },
+            )
+        except Exception:
+            logger.exception(
+                "Unable to save assistant message."
+            )
+
+        return {
+            "ok": True,
+            "response": response,
+            "source": source,
+        }
+
+    # =========================================================
+    # Create work card
+    # =========================================================
+
+    async def create_work_card(
         self,
-        project_id: Optional[int],
+        project_id: int,
         title: str,
-        description: str,
+        description: str = "",
         workflow_type: str = "assistant",
         metadata: Optional[dict[str, Any]] = None,
+        requires_approval: bool = True,
     ) -> dict[str, Any]:
-        """
-        Create a work card.
 
-        New operational cards default to needs_approval so that
-        sensitive work is never silently executed.
-        """
+        status = (
+            "needs_approval"
+            if requires_approval
+            else "queued"
+        )
 
-        card = self.database.create_work_card(
+        card = self.db.create_work_card(
             project_id=project_id,
             title=title,
             description=description,
             workflow_type=workflow_type,
-            status="needs_approval",
+            status=status,
             metadata=metadata or {},
         )
 
-        card_id = card.get("id")
-
-        try:
-            self.database.create_event(
-                event_type="approval_required",
-                message=(
-                    "تم إنشاء بطاقة عمل وتحتاج إلى موافقة المستخدم."
-                ),
-                project_id=project_id,
-                work_card_id=card_id,
-                metadata={
-                    "title": title,
-                    "workflow_type": workflow_type,
-                },
-            )
-        except Exception:
-            pass
-
         return card
 
-    def summarize_work_card(
+    # =========================================================
+    # Summarize work card
+    # =========================================================
+
+    async def summarize_work_card(
         self,
-        card: dict[str, Any],
+        work_card_id: int,
     ) -> str:
-        title = card.get("title", "بدون عنوان")
-        description = card.get("description", "")
-        status = card.get("status", "unknown")
-        workflow = card.get(
-            "workflow_type",
-            "assistant",
+
+        card = self.db.get_work_card(
+            work_card_id
+        )
+
+        if not card:
+            return "لم يتم العثور على بطاقة العمل."
+
+        title = card.get(
+            "title",
+            "",
+        )
+
+        description = card.get(
+            "description",
+            "",
+        )
+
+        status = card.get(
+            "status",
+            "",
         )
 
         return (
             f"المهمة: {title}\n"
-            f"النوع: {workflow}\n"
-            f"الحالة: {status}\n"
-            f"التفاصيل: {description}"
+            f"الوصف: {description}\n"
+            f"الحالة: {status}"
         )
+
+    # =========================================================
+    # Parse workflow request
+    # =========================================================
 
     def parse_workflow_request(
         self,
         message: str,
     ) -> dict[str, Any]:
-        """
-        Lightweight workflow classifier.
 
-        This does not execute anything. It only determines the
-        likely workflow category for later approval.
-        """
+        text = message.strip()
 
-        text = message.lower()
+        if not text:
+            return {
+                "workflow_type": "assistant",
+                "requires_approval": True,
+                "operations": [],
+            }
+
+        lowered = text.lower()
+
+        workflow_type = "assistant"
 
         if any(
-            word in text
-            for word in (
+            keyword in lowered
+            for keyword in (
                 "api",
-                "واجهة",
-                "حساب",
-                "account",
-                "token",
+                "واجهة api",
+                "api ",
             )
         ):
-            workflow_type = "api_account"
+            workflow_type = "api"
 
         elif any(
-            word in text
-            for word in (
-                "رفع",
+            keyword in lowered
+            for keyword in (
+                "browser",
+                "playwright",
+                "متصفح",
+                "موقع",
+            )
+        ):
+            workflow_type = "browser"
+
+        elif any(
+            keyword in lowered
+            for keyword in (
                 "upload",
-                "تصميم",
+                "رفع",
+                "ملف",
                 "design",
+                "تصميم",
                 "pod",
-                "منتج",
             )
         ):
-            workflow_type = "upload_design"
+            workflow_type = "upload"
 
-        elif any(
-            word in text
-            for word in (
-                "كود",
-                "code",
-                "برمجة",
-                "github",
-                "api",
-            )
-        ):
-            workflow_type = "code_api"
-
-        elif any(
-            word in text
-            for word in (
-                "dual",
-                "مزدوج",
-                "متعدد",
-            )
-        ):
-            workflow_type = "dual"
-
-        else:
-            workflow_type = "assistant"
-
-        sensitive = any(
-            word in text
-            for word in (
-                "حذف",
-                "دفع",
-                "شراء",
-                "نشر",
-                "publish",
-                "delete",
-                "payment",
-                "شراء",
-                "تغيير كلمة المرور",
-                "password",
-                "token",
-            )
-        )
+        operations: list[dict[str, Any]] = []
 
         return {
             "workflow_type": workflow_type,
-            "requires_approval": sensitive or workflow_type != "assistant",
+            "requires_approval": True,
+            "operations": operations,
+            "original_request": text,
         }
 
-    def export_state(self) -> dict[str, Any]:
-        """
-        Return non-secret agent configuration/state.
-        """
-        return {
-            "model": self.settings.openai_model,
-            "openai_configured": bool(
-                self.settings.openai_api_key
-            ),
-            }
+    # =========================================================
+    # Validate operations
+    # =========================================================
+
+    def validate_operations(
+        self,
+        operations: Any,
+    ) -> tuple[bool, list[str]]:
+
+        if not isinstance(
+            operations,
+            list,
+        ):
+            return (
+                False,
+                ["operations يجب أن تكون قائمة."],
+            )
+
+        errors: list[str] = []
+
+        for index, operation in enumerate(
+            operations
+        ):
+            if not isinstance(
+                operation,
+                dict,
+            ):
+                errors.append(
+                    f"العملية رقم {index + 1} ليست كائناً."
+                )
+                continue
+
+            operation_type = str(
+                operation.get(
+                    "type",
+                    "",
+                )
+            ).strip().lower()
+
+            if operation_type not in self.ALLOWED_OPERATIONS:
+                errors.append(
+                    "العملية غير مسموحة: "
+                    f"{operation_type}"
+                )
+
+        return (
+            len(errors) == 0,
+            errors,
+        )
+
+    # =========================================================
+    # Export state
+    # =========================================================
+
+    def export_state(
+        self,
+        project_id: Optional[int] = None,
+    ) -> dict[str, Any]:
+
+        state: dict[str, Any] = {
+            "project_id": project_id,
+            "chat_messages": [],
+            "work_cards": [],
+        }
+
+        try:
+            state["chat_messages"] = (
+                self.db.list_chat_messages(
+                    project_id=project_id,
+                    limit=100,
+                )
+            )
+        except Exception:
+            logger.exception(
+                "Unable to export chat state."
+            )
+
+        try:
+            state["work_cards"] = (
+                self.db.list_work_cards(
+                    project_id=project_id,
+                    limit=100,
+                )
+            )
+        except Exception:
+            logger.exception(
+                "Unable to export work-card state."
+            )
+
+        return state
