@@ -199,7 +199,7 @@ async function loadCards() {
 
   state.cards = Array.isArray(data)
     ? data
-    : data.cards || [];
+    : (data.work_cards || data.cards || []);
 
   renderCards();
   updateStats();
@@ -413,6 +413,7 @@ async function sendChat(message) {
     method: "POST",
     body: JSON.stringify({
       message,
+      project_id: state.selectedProjectId || null,
     }),
   });
 
@@ -990,3 +991,4 @@ document.addEventListener(
   "DOMContentLoaded",
   initialize
 );
+
