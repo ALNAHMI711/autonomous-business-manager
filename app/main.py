@@ -1,83 +1,67 @@
 from __future__ import annotations
 
+import asyncio
 import secrets
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Optional
 
-from fastapi import (
-    Cookie,
-    Depends,
-    FastAPI,
-    File,
-    HTTPException,
-    UploadFile,
-)
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .agent import Agent
-from .approval import ApprovalManager
-from .browser import BrowserManager
-from .code_analyzer import CodeAnalyzer
-from .config import get_settings
-from .connectivity import ConnectivityMonitor
-from .database import Database
-from .models import ApprovalAction, WorkflowType
-from .notifications import NotificationManager
-from .security import PasswordHasher, SecretBox
-from .task_manager import TaskManager
+from app.agent import Agent
+from app.approval import ApprovalManager
+from app.browser import BrowserManager
+from app.code_analyzer import CodeAnalyzer
+from app.config import settings
+from app.connectivity import ConnectivityMonitor
+from app.database import Database
+from app.notifications import NotificationManager
+from app.security import PasswordHasher, SecretBox
+from app.task_manager import TaskManager
 
 
-settings = get_settings()
+BASE_DIR = Path(__file__).resolve().parent.parent
+FRONTEND_DIR = BASE_DIR / "frontend"
+STATIC_DIR = FRONTEND_DIR / "static"
 
-database = Database(settings.database_path)
+
+db = Database(settings.database_path)
 password_hasher = PasswordHasher()
 secret_box = SecretBox(settings.encryption_key)
 
 agent = Agent(
+    database=db,
     settings=settings,
-    database=database,
 )
 
+approval_manager = ApprovalManager(db)
+
 browser = BrowserManager(
+    database=db,
     settings=settings,
-    database=database,
 )
 
 notifications = NotificationManager(
+    database=db,
     settings=settings,
-    database=database,
-)
-
-approval = ApprovalManager(
-    database=database,
 )
 
 code_analyzer = CodeAnalyzer()
 
+connectivity = ConnectivityMonitor(
+    database=db,
+    settings=settings,
+)
+
 task_manager = TaskManager(
-    database=database,
+    database=db,
     agent=agent,
     browser=browser,
     notifications=notifications,
-    approval=approval,
-)
-
-connectivity = ConnectivityMonitor(
-    settings=settings,
-    database=database,
-)
-
-app = FastAPI(
-    title=settings.app_name,
-    version="1.0.0",
-)
-
-app.mount(
-    "/static",
-    StaticFiles(directory="frontend/static"),
-    name="static",
+    approval_manager=approval_manager,
 )
 
 
@@ -89,44 +73,47 @@ class LoginRequest(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    message: str = Field(min_length=1, max_length=20000)
+    message: str = Field(min_length=1, max_length=10000)
+    project_id: Optional[int] = None
 
 
 class ProjectCreateRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
-    description: str = Field(default="", max_length=2000)
-    workflow_type: WorkflowType = WorkflowType.assistant
+    name: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=5000)
 
 
 class WorkCardActionRequest(BaseModel):
-    action: ApprovalAction
-
-
-class CodeAnalyzeRequest(BaseModel):
-    code: str = Field(min_length=1, max_length=500000)
+    action: str
 
 
 class BrowserOpenRequest(BaseModel):
     project_id: int
-    site: str
+    site: str = Field(min_length=1, max_length=500)
+    url: str = Field(min_length=1, max_length=2000)
 
 
 class BrowserNavigateRequest(BaseModel):
     project_id: int
-    url: str
+    url: str = Field(min_length=1, max_length=2000)
 
 
-class BrowserCloseRequest(BaseModel):
+class BrowserClickRequest(BaseModel):
     project_id: int
+    selector: str = Field(min_length=1, max_length=2000)
 
 
-class SecretPanelVerifyRequest(BaseModel):
-    password: str = Field(min_length=1)
+class BrowserFillRequest(BaseModel):
+    project_id: int
+    selector: str = Field(min_length=1, max_length=2000)
+    value: str = Field(max_length=10000)
 
 
-class SecretCreateRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
-    value: str = Field(min_length=1, max_length=10000)
+class SecretPanelRequest(BaseModel):
+    password: str
+
+
+def _cookie_secure() -> bool:
+    return settings.app_env.lower() == "production"
 
 
 def _verify_admin_password(password: str) -> bool:
@@ -135,118 +122,124 @@ def _verify_admin_password(password: str) -> bool:
     if not configured:
         return False
 
-    try:
-        if password_hasher.verify(
-            password,
-            configured,
-        ):
-            return True
-    except Exception:
-        pass
-
-    return secrets.compare_digest(
-        password,
-        configured,
-    )
+    return password == configured
 
 
-def _verify_api_panel_password(password: str) -> bool:
-    configured = settings.api_panel_password
-
-    if not configured:
-        return False
-
-    try:
-        if password_hasher.verify(
-            password,
-            configured,
-        ):
-            return True
-    except Exception:
-        pass
-
-    return secrets.compare_digest(
-        password,
-        configured,
-    )
+def _get_session_from_request(request: Request) -> Optional[str]:
+    return request.cookies.get("session")
 
 
-def _cookie_secure() -> bool:
-    return settings.app_env.lower() == "production"
+def _require_session(request: Request) -> str:
+    token = _get_session_from_request(request)
 
-
-def _require_session(
-    session: str | None = Cookie(default=None),
-) -> str:
-    if not session:
+    if not token or token not in _active_sessions:
         raise HTTPException(
             status_code=401,
-            detail="يجب تسجيل الدخول أولاً.",
+            detail="جلسة الدخول غير صالحة أو منتهية.",
         )
 
-    if session not in _active_sessions:
-        raise HTTPException(
-            status_code=401,
-            detail="انتهت الجلسة.",
-        )
-
-    return session
+    return token
 
 
 async def _handle_offline() -> None:
+    """
+    When internet connectivity is lost:
+    - mark running work cards as paused
+    - record an event
+    - notify through configured channels
+    """
     try:
-        database.execute_script(
+        db.execute_script(
             """
             UPDATE work_cards
-            SET
-                status = 'paused',
-                error_message = 'connection_lost'
-            WHERE status = 'running';
+            SET status = 'paused',
+                error_message = 'connection_lost',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE status = 'running'
             """
         )
+    except Exception:
+        pass
 
+    try:
+        db.create_event(
+            event_type="connection_lost",
+            message="انقطع اتصال الإنترنت. تم إيقاف الأعمال الجارية مؤقتاً.",
+        )
+    except Exception:
+        pass
+
+    try:
         await notifications.send_offline()
-
     except Exception:
         pass
 
 
 async def _handle_online() -> None:
+    """
+    When connectivity returns:
+    - resume cards paused specifically because of connection loss
+    - record an event
+    - notify
+    """
     try:
-        await notifications.send_restored()
-
-        database.execute_script(
+        db.execute_script(
             """
             UPDATE work_cards
-            SET
-                status = 'queued',
-                error_message = NULL
-            WHERE
-                status = 'paused'
-                AND error_message = 'connection_lost';
+            SET status = 'queued',
+                error_message = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE status = 'paused'
+              AND error_message = 'connection_lost'
             """
         )
+    except Exception:
+        pass
 
+    try:
+        db.create_event(
+            event_type="connection_restored",
+            message="عاد اتصال الإنترنت. تم استئناف الأعمال المتوقفة بسبب الانقطاع.",
+        )
+    except Exception:
+        pass
+
+    try:
+        await notifications.send_restored()
     except Exception:
         pass
 
 
-@app.on_event("startup")
-async def startup() -> None:
-    database.initialize()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Application lifecycle.
+    """
+    try:
+        db.initialize()
+    except Exception:
+        pass
 
-    await browser.initialize()
+    try:
+        await browser.initialize()
+    except Exception:
+        pass
 
-    connectivity.set_callbacks(
-        on_offline=_handle_offline,
-        on_online=_handle_online,
-    )
+    try:
+        connectivity.set_callbacks(
+            on_offline=_handle_offline,
+            on_online=_handle_online,
+        )
+    except Exception:
+        pass
 
-    await connectivity.start()
+    try:
+        await connectivity.start()
+    except Exception:
+        pass
 
+    yield
 
-@app.on_event("shutdown")
-async def shutdown() -> None:
     try:
         await connectivity.stop()
     except Exception:
@@ -258,48 +251,63 @@ async def shutdown() -> None:
         pass
 
 
-@app.get("/")
-async def root() -> FileResponse:
-    return FileResponse(
-        "frontend/login.html"
+app = FastAPI(
+    title=settings.app_name,
+    version="1.0.0",
+    debug=settings.debug,
+    lifespan=lifespan,
+)
+
+
+if STATIC_DIR.exists():
+    app.mount(
+        "/static",
+        StaticFiles(directory=str(STATIC_DIR)),
+        name="static",
     )
+
+
+@app.get("/")
+async def root():
+    token = _get_session_from_request
+
+    return RedirectResponse(url="/dashboard")
+
+
+@app.get("/login")
+async def login_page():
+    return FileResponse(FRONTEND_DIR / "login.html")
 
 
 @app.get("/dashboard")
-async def dashboard(
-    session: str | None = Cookie(default=None),
-) -> Any:
-    if (
-        not session
-        or session not in _active_sessions
-    ):
-        return RedirectResponse(
-            url="/",
-            status_code=303,
-        )
+async def dashboard(request: Request):
+    session = _get_session_from_request(request)
 
-    return FileResponse(
-        "frontend/index.html"
-    )
+    if not session or session not in _active_sessions:
+        return RedirectResponse(url="/login")
+
+    return FileResponse(FRONTEND_DIR / "index.html")
 
 
 @app.get("/health")
-async def health() -> dict[str, Any]:
+async def health():
+    online = True
+
+    try:
+        online = connectivity.is_online()
+    except Exception:
+        pass
+
     return {
         "status": "ok",
+        "online": online,
         "app": settings.app_name,
-        "environment": settings.app_env,
-        "internet": connectivity.is_online,
     }
 
 
 @app.post("/api/login")
-async def login(
-    request: LoginRequest,
-) -> Any:
-    if not _verify_admin_password(
-        request.password
-    ):
+async def login(request: LoginRequest):
+    if not _verify_admin_password(request.password):
         raise HTTPException(
             status_code=401,
             detail="كلمة المرور غير صحيحة.",
@@ -309,17 +317,14 @@ async def login(
 
     _active_sessions.add(token)
 
-    response = {
-        "success": True,
-        "message": "تم تسجيل الدخول بنجاح.",
-    }
-
-    result = RedirectResponse(
-        url="/dashboard",
-        status_code=303,
+    response = JSONResponse(
+        {
+            "success": True,
+            "message": "تم تسجيل الدخول بنجاح.",
+        }
     )
 
-    result.set_cookie(
+    response.set_cookie(
         key="session",
         value=token,
         httponly=True,
@@ -329,65 +334,65 @@ async def login(
         path="/",
     )
 
-    return result if False else {
-        **response,
-        "_set_cookie": token,
-    }
-
-
-@app.post("/api/logout")
-async def logout(
-    session: str = Depends(_require_session),
-) -> Any:
-    _active_sessions.discard(session)
-
-    response = {
-        "success": True,
-        "message": "تم تسجيل الخروج.",
-    }
+    try:
+        db.create_event(
+            event_type="info",
+            message="تم تسجيل دخول جديد إلى لوحة التحكم.",
+        )
+    except Exception:
+        pass
 
     return response
 
 
-@app.post("/api/chat")
-async def chat(
-    request: ChatRequest,
-    session: str = Depends(_require_session),
-) -> dict[str, Any]:
-    result = await agent.chat(
-        request.message
+@app.post("/api/logout")
+async def logout(session: str = Depends(_require_session)):
+    _active_sessions.discard(session)
+
+    response = JSONResponse(
+        {
+            "success": True,
+            "message": "تم تسجيل الخروج.",
+        }
     )
 
-    return result
+    response.delete_cookie(
+        key="session",
+        path="/",
+    )
+
+    return response
 
 
 @app.get("/api/projects")
-async def list_projects(
-    session: str = Depends(_require_session),
-) -> Any:
-    return database.list_projects()
+async def list_projects(_: str = Depends(_require_session)):
+    return {
+        "projects": db.list_projects(),
+    }
 
 
 @app.post("/api/projects")
 async def create_project(
     request: ProjectCreateRequest,
-    session: str = Depends(_require_session),
-) -> Any:
-    project_id = database.create_project(
+    _: str = Depends(_require_session),
+):
+    project = db.create_project(
         name=request.name,
         description=request.description,
-        workflow_type=request.workflow_type.value,
     )
 
-    return database.get_project(project_id)
+    return {
+        "success": True,
+        "project": project,
+    }
 
 
 @app.get("/api/projects/{project_id}")
 async def get_project(
     project_id: int,
-    session: str = Depends(_require_session),
-) -> Any:
-    project = database.get_project(project_id)
+    _: str = Depends(_require_session),
+):
+    project = db.get_project(project_id)
 
     if not project:
         raise HTTPException(
@@ -395,22 +400,78 @@ async def get_project(
             detail="المشروع غير موجود.",
         )
 
-    return project
+    return {
+        "project": project,
+    }
+
+
+@app.delete("/api/projects/{project_id}")
+async def delete_project(
+    project_id: int,
+    _: str = Depends(_require_session),
+):
+    project = db.get_project(project_id)
+
+    if not project:
+        raise HTTPException(
+            status_code=404,
+            detail="المشروع غير موجود.",
+        )
+
+    db.delete_project(project_id)
+
+    return {
+        "success": True,
+    }
+
+
+@app.post("/api/chat")
+async def chat(
+    request: ChatRequest,
+    _: str = Depends(_require_session),
+):
+    result = await agent.chat(
+        message=request.message,
+        project_id=request.project_id,
+    )
+
+    return {
+        "success": True,
+        "response": result,
+    }
+
+
+@app.get("/api/chat/{project_id}")
+async def project_chat(
+    project_id: int,
+    _: str = Depends(_require_session),
+):
+    return {
+        "messages": db.list_chat_messages(project_id),
+    }
 
 
 @app.get("/api/work-cards")
 async def list_work_cards(
-    session: str = Depends(_require_session),
-) -> Any:
-    return database.list_work_cards()
+    project_id: Optional[int] = None,
+    _: str = Depends(_require_session),
+):
+    if project_id is not None:
+        cards = db.list_work_cards(project_id)
+    else:
+        cards = db.list_all_work_cards()
+
+    return {
+        "work_cards": cards,
+    }
 
 
 @app.get("/api/work-cards/{card_id}")
 async def get_work_card(
     card_id: int,
-    session: str = Depends(_require_session),
-) -> Any:
-    card = database.get_work_card(card_id)
+    _: str = Depends(_require_session),
+):
+    card = db.get_work_card(card_id)
 
     if not card:
         raise HTTPException(
@@ -418,51 +479,167 @@ async def get_work_card(
             detail="بطاقة العمل غير موجودة.",
         )
 
-    return card
+    return {
+        "work_card": card,
+    }
 
 
 @app.post("/api/work-cards/{card_id}/action")
 async def work_card_action(
     card_id: int,
     request: WorkCardActionRequest,
-    session: str = Depends(_require_session),
-) -> Any:
+    _: str = Depends(_require_session),
+):
+    allowed = {
+        "approve",
+        "reject",
+        "pause",
+        "stop",
+        "resume",
+    }
+
+    if request.action not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail="إجراء غير صالح.",
+        )
+
     try:
-        result = approval.handle(
+        result = await approval_manager.handle_action(
             card_id=card_id,
             action=request.action,
         )
-
-        return result
-
-    except ValueError as exc:
+    except Exception as exc:
         raise HTTPException(
             status_code=400,
             detail=str(exc),
+        ) from exc
+
+    return {
+        "success": True,
+        "result": result,
+    }
+
+
+@app.get("/api/events")
+async def events(
+    limit: int = 100,
+    _: str = Depends(_require_session),
+):
+    limit = max(1, min(limit, 500))
+
+    return {
+        "events": db.list_events(limit=limit),
+    }
+
+
+@app.post("/api/browser/open")
+async def browser_open(
+    request: BrowserOpenRequest,
+    _: str = Depends(_require_session),
+):
+    project = db.get_project(request.project_id)
+
+    if not project:
+        raise HTTPException(
+            status_code=404,
+            detail="المشروع غير موجود.",
         )
+
+    result = await browser.open_project(
+        project_id=request.project_id,
+        site=request.site,
+        url=request.url,
+    )
+
+    return {
+        "success": True,
+        "browser": result,
+    }
+
+
+@app.post("/api/browser/navigate")
+async def browser_navigate(
+    request: BrowserNavigateRequest,
+    _: str = Depends(_require_session),
+):
+    result = await browser.navigate(
+        project_id=request.project_id,
+        url=request.url,
+    )
+
+    return {
+        "success": True,
+        "browser": result,
+    }
+
+
+@app.get("/api/browser/status/{project_id}")
+async def browser_status(
+    project_id: int,
+    _: str = Depends(_require_session),
+):
+    return {
+        "status": await browser.get_status(project_id),
+    }
+
+
+@app.post("/api/browser/click")
+async def browser_click(
+    request: BrowserClickRequest,
+    _: str = Depends(_require_session),
+):
+    result = await browser.click(
+        project_id=request.project_id,
+        selector=request.selector,
+    )
+
+    return {
+        "success": True,
+        "result": result,
+    }
+
+
+@app.post("/api/browser/fill")
+async def browser_fill(
+    request: BrowserFillRequest,
+    _: str = Depends(_require_session),
+):
+    result = await browser.fill(
+        project_id=request.project_id,
+        selector=request.selector,
+        value=request.value,
+    )
+
+    return {
+        "success": True,
+        "result": result,
+    }
+
+
+@app.post("/api/browser/close/{project_id}")
+async def browser_close(
+    project_id: int,
+    _: str = Depends(_require_session),
+):
+    result = await browser.close_project(project_id)
+
+    return {
+        "success": True,
+        "result": result,
+    }
 
 
 @app.post("/api/code/analyze")
 async def analyze_code(
-    request: CodeAnalyzeRequest,
-    session: str = Depends(_require_session),
-) -> Any:
-    return code_analyzer.analyze(
-        request.code
-    )
-
-
-@app.post("/api/upload")
-async def upload_file(
     file: UploadFile = File(...),
-    session: str = Depends(_require_session),
-) -> Any:
-    filename = Path(
-        file.filename or "upload.bin"
-    ).name
-
-    if not filename:
-        filename = "upload.bin"
+    _: str = Depends(_require_session),
+):
+    if not file.filename:
+        raise HTTPException(
+            status_code=400,
+            detail="اسم الملف غير موجود.",
+        )
 
     content = await file.read()
 
@@ -472,134 +649,47 @@ async def upload_file(
             detail="حجم الملف أكبر من الحد المسموح.",
         )
 
-    upload_dir = Path(
-        settings.upload_dir
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(
+            status_code=400,
+            detail="الملف يجب أن يكون نصياً بترميز UTF-8.",
+        )
+
+    result = code_analyzer.analyze(
+        filename=file.filename,
+        source=text,
     )
 
-    upload_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    safe_name = (
-        f"{secrets.token_hex(8)}_{filename}"
-    )
-
-    target = upload_dir / safe_name
-
-    target.write_bytes(content)
-
-    file_id = database.create_uploaded_file(
-        original_name=filename,
-        stored_path=str(target),
-        size=len(content),
-        content_type=file.content_type or "",
-    )
+    try:
+        db.save_uploaded_file(
+            filename=file.filename,
+            content_size=len(content),
+            analysis=result,
+        )
+    except Exception:
+        pass
 
     return {
         "success": True,
-        "file_id": file_id,
-        "filename": filename,
-        "size": len(content),
-    }
-
-
-@app.post("/api/browser/open")
-async def browser_open(
-    request: BrowserOpenRequest,
-    session: str = Depends(_require_session),
-) -> Any:
-    try:
-        return await browser.open_project(
-            project_id=request.project_id,
-            site=request.site,
-        )
-
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        )
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"تعذر فتح المتصفح: {exc}",
-        )
-
-
-@app.post("/api/browser/navigate")
-async def browser_navigate(
-    request: BrowserNavigateRequest,
-    session: str = Depends(_require_session),
-) -> Any:
-    try:
-        result = await browser.navigate(
-            project_id=request.project_id,
-            url=request.url,
-        )
-
-        if result.get("session_expired"):
-            await notifications.send_reauth(
-                project_id=request.project_id
-            )
-
-        return result
-
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        )
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"تعذر الانتقال: {exc}",
-        )
-
-
-@app.get("/api/browser/status/{project_id}")
-async def browser_status(
-    project_id: int,
-    session: str = Depends(_require_session),
-) -> Any:
-    result = await browser.get_status(
-        project_id
-    )
-
-    if result.get("session_expired"):
-        await notifications.send_reauth(
-            project_id=project_id
-        )
-
-    return result
-
-
-@app.post("/api/browser/close")
-async def browser_close(
-    request: BrowserCloseRequest,
-    session: str = Depends(_require_session),
-) -> Any:
-    await browser.close_project(
-        request.project_id
-    )
-
-    return {
-        "success": True,
-        "project_id": request.project_id,
-        "status": "closed",
+        "filename": file.filename,
+        "analysis": result,
     }
 
 
 @app.post("/api/secrets/panel/verify")
 async def verify_secret_panel(
-    request: SecretPanelVerifyRequest,
-    session: str = Depends(_require_session),
-) -> Any:
-    if not _verify_api_panel_password(
-        request.password
-    ):
+    request: SecretPanelRequest,
+    _: str = Depends(_require_session),
+):
+    if not settings.api_panel_password:
+        raise HTTPException(
+            status_code=503,
+            detail="لوحة الأسرار غير مهيأة.",
+        )
+
+    if request.password != settings.api_panel_password:
         raise HTTPException(
             status_code=401,
             detail="كلمة مرور لوحة الأسرار غير صحيحة.",
@@ -607,33 +697,67 @@ async def verify_secret_panel(
 
     return {
         "success": True,
-        "message": "تم التحقق من لوحة الأسرار.",
+        "message": "تم فتح لوحة الأسرار.",
     }
 
 
-@app.post("/api/secrets")
-async def create_secret(
-    request: SecretCreateRequest,
-    session: str = Depends(_require_session),
-) -> Any:
-    encrypted = secret_box.encrypt(
-        request.value
-    )
+@app.get("/api/secrets")
+async def list_secrets(
+    _: str = Depends(_require_session),
+):
+    return {
+        "secrets": db.list_secrets_metadata(),
+    }
 
-    secret_id = database.create_secret(
-        name=request.name,
-        encrypted_value=encrypted,
-    )
+
+@app.get("/api/notifications/status")
+async def notification_status(
+    _: str = Depends(_require_session),
+):
+    return {
+        "telegram": notifications.telegram_configured(),
+        "whatsapp": notifications.whatsapp_configured(),
+    }
+
+
+@app.get("/api/browser/sessions")
+async def browser_sessions(
+    _: str = Depends(_require_session),
+):
+    return {
+        "sessions": db.list_browser_sessions(),
+    }
+
+
+@app.get("/api/connectivity")
+async def connectivity_status(
+    _: str = Depends(_require_session),
+):
+    try:
+        online = connectivity.is_online()
+    except Exception:
+        online = False
 
     return {
-        "success": True,
-        "secret_id": secret_id,
-        "name": request.name,
+        "online": online,
     }
 
 
-@app.get("/api/events")
-async def list_events(
-    session: str = Depends(_require_session),
-) -> Any:
-    return database.list_events(limit=100)
+@app.exception_handler(404)
+async def not_found_handler(request: Request, exc):
+    if request.url.path.startswith("/api/"):
+        return JSONResponse(
+            status_code=404,
+            content={
+                "success": False,
+                "detail": "المسار غير موجود.",
+            },
+        )
+
+    return JSONResponse(
+        status_code=404,
+        content={
+            "success": False,
+            "detail": "الصفحة غير موجودة.",
+        },
+)
