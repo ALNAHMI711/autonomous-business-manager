@@ -8,7 +8,6 @@ from urllib.parse import urlparse
 from playwright.async_api import (
     Browser,
     BrowserContext,
-    ElementHandle,
     Page,
     Playwright,
     TimeoutError as PlaywrightTimeoutError,
@@ -73,6 +72,7 @@ class BrowserManager:
                 await self._browser.close()
             except Exception:
                 pass
+
             self._browser = None
 
         if self._playwright is not None:
@@ -80,26 +80,39 @@ class BrowserManager:
                 await self._playwright.stop()
             except Exception:
                 pass
+
             self._playwright = None
 
     def _safe_site_name(self, site: str) -> str:
         parsed = urlparse(site)
 
         hostname = parsed.hostname or "unknown-site"
-        hostname = re.sub(r"[^a-zA-Z0-9._-]", "_", hostname)
+
+        hostname = re.sub(
+            r"[^a-zA-Z0-9._-]",
+            "_",
+            hostname,
+        )
 
         return hostname[:100]
 
-    def _profile_path(self, project_id: int, site: str) -> Path:
+    def _profile_path(
+        self,
+        project_id: int,
+        site: str,
+    ) -> Path:
         safe_site = self._safe_site_name(site)
 
         path = (
-            Path("browser_profiles")
+            self.settings.browser_profile_directory
             / str(project_id)
             / safe_site
         )
 
-        path.mkdir(parents=True, exist_ok=True)
+        path.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
         return path
 
@@ -109,10 +122,13 @@ class BrowserManager:
         if parsed.scheme == "https":
             return url
 
-        if parsed.scheme == "http" and parsed.hostname in {
-            "127.0.0.1",
-            "localhost",
-        }:
+        if (
+            parsed.scheme == "http"
+            and parsed.hostname in {
+                "127.0.0.1",
+                "localhost",
+            }
+        ):
             return url
 
         raise ValueError(
@@ -128,7 +144,9 @@ class BrowserManager:
         await self.initialize()
 
         if self._browser is None:
-            raise RuntimeError("المتصفح غير متاح.")
+            raise RuntimeError(
+                "المتصفح غير متاح."
+            )
 
         site = self._validate_url(site)
 
@@ -148,11 +166,19 @@ class BrowserManager:
                 "project_id": project_id,
                 "url": page.url,
                 "status": "connected",
+                "session_expired": self.is_session_expired(
+                    page.url
+                ),
             }
 
-        profile_path = self._profile_path(project_id, site)
+        profile_path = self._profile_path(
+            project_id,
+            site,
+        )
 
-        storage_state = profile_path / "storage_state.json"
+        storage_state = (
+            profile_path / "storage_state.json"
+        )
 
         context_kwargs: dict[str, Any] = {
             "viewport": {
@@ -163,9 +189,13 @@ class BrowserManager:
         }
 
         if storage_state.exists():
-            context_kwargs["storage_state"] = str(storage_state)
+            context_kwargs["storage_state"] = str(
+                storage_state
+            )
 
-        context = await self._browser.new_context(**context_kwargs)
+        context = await self._browser.new_context(
+            **context_kwargs
+        )
 
         page = await context.new_page()
 
@@ -176,19 +206,23 @@ class BrowserManager:
             await page.goto(
                 site,
                 wait_until="domcontentloaded",
-                timeout=self.settings.browser_timeout_ms,
+                timeout=self.settings.browser_timeout,
             )
         except PlaywrightTimeoutError:
-            # الصفحة قد تكون وصلت فعلياً رغم انتهاء مهلة الانتظار.
             pass
 
-        await self._save_storage_state(project_id, site)
+        await self._save_storage_state(
+            project_id,
+            site,
+        )
 
         return {
             "project_id": project_id,
             "url": page.url,
             "status": "connected",
-            "session_expired": self.is_session_expired(page.url),
+            "session_expired": self.is_session_expired(
+                page.url
+            ),
         }
 
     async def navigate(
@@ -202,32 +236,49 @@ class BrowserManager:
 
         if page is None:
             raise ValueError(
-                "لا توجد جلسة متصفح للمشروع. افتح المشروع أولاً."
+                "لا توجد جلسة متصفح للمشروع. "
+                "افتح المشروع أولاً."
             )
 
         try:
             await page.goto(
                 url,
                 wait_until="domcontentloaded",
-                timeout=self.settings.browser_timeout_ms,
+                timeout=self.settings.browser_timeout,
             )
         except PlaywrightTimeoutError:
             pass
 
-        site = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+        parsed = urlparse(url)
 
-        await self._save_storage_state(project_id, site)
+        site = (
+            f"{parsed.scheme}://{parsed.netloc}"
+        )
 
-        expired = self.is_session_expired(page.url)
+        await self._save_storage_state(
+            project_id,
+            site,
+        )
+
+        expired = self.is_session_expired(
+            page.url
+        )
 
         return {
             "project_id": project_id,
             "url": page.url,
             "session_expired": expired,
-            "status": "needs_reauth" if expired else "connected",
+            "status": (
+                "needs_reauth"
+                if expired
+                else "connected"
+            ),
         }
 
-    async def get_status(self, project_id: int) -> dict[str, Any]:
+    async def get_status(
+        self,
+        project_id: int,
+    ) -> dict[str, Any]:
         page = self._pages.get(project_id)
 
         if page is None:
@@ -243,18 +294,34 @@ class BrowserManager:
         except Exception:
             url = None
 
-        expired = self.is_session_expired(url or "")
+        expired = self.is_session_expired(
+            url or ""
+        )
 
         return {
             "project_id": project_id,
-            "status": "needs_reauth" if expired else "connected",
+            "status": (
+                "needs_reauth"
+                if expired
+                else "connected"
+            ),
             "url": url,
             "session_expired": expired,
         }
 
-    async def close_project(self, project_id: int) -> None:
-        context = self._contexts.pop(project_id, None)
-        self._pages.pop(project_id, None)
+    async def close_project(
+        self,
+        project_id: int,
+    ) -> None:
+        context = self._contexts.pop(
+            project_id,
+            None,
+        )
+
+        self._pages.pop(
+            project_id,
+            None,
+        )
 
         if context is None:
             return
@@ -272,21 +339,30 @@ class BrowserManager:
         page = self._get_page(project_id)
 
         await page.locator(selector).click(
-            timeout=self.settings.browser_timeout_ms
+            timeout=self.settings.browser_timeout
         )
 
-        await page.wait_for_load_state(
-            "domcontentloaded",
-            timeout=self.settings.browser_timeout_ms,
-        )
+        try:
+            await page.wait_for_load_state(
+                "domcontentloaded",
+                timeout=self.settings.browser_timeout,
+            )
+        except PlaywrightTimeoutError:
+            pass
 
-        expired = self.is_session_expired(page.url)
+        expired = self.is_session_expired(
+            page.url
+        )
 
         return {
             "project_id": project_id,
             "url": page.url,
             "session_expired": expired,
-            "status": "needs_reauth" if expired else "ok",
+            "status": (
+                "needs_reauth"
+                if expired
+                else "ok"
+            ),
         }
 
     async def fill(
@@ -299,7 +375,7 @@ class BrowserManager:
 
         await page.locator(selector).fill(
             value,
-            timeout=self.settings.browser_timeout_ms,
+            timeout=self.settings.browser_timeout,
         )
 
         return {
@@ -314,8 +390,10 @@ class BrowserManager:
     ) -> str:
         page = self._get_page(project_id)
 
-        return await page.locator(selector).inner_text(
-            timeout=self.settings.browser_timeout_ms
+        return await page.locator(
+            selector
+        ).inner_text(
+            timeout=self.settings.browser_timeout
         )
 
     async def screenshot(
@@ -346,25 +424,32 @@ class BrowserManager:
         page = self._get_page(project_id)
 
         title = await page.title()
-
         url = page.url
 
-        text = await page.locator("body").inner_text(
-            timeout=self.settings.browser_timeout_ms
+        text = await page.locator(
+            "body"
+        ).inner_text(
+            timeout=self.settings.browser_timeout
         )
 
-        links = await page.locator("a").all()
+        links = await page.locator(
+            "a"
+        ).all()
 
         link_data: list[dict[str, str]] = []
 
         for link in links[:100]:
             try:
-                text_value = (await link.inner_text()).strip()
+                text_value = (
+                    await link.inner_text()
+                ).strip()
             except Exception:
                 text_value = ""
 
             try:
-                href = await link.get_attribute("href")
+                href = await link.get_attribute(
+                    "href"
+                )
             except Exception:
                 href = None
 
@@ -382,7 +467,9 @@ class BrowserManager:
             "title": title,
             "text": text[:20000],
             "links": link_data,
-            "session_expired": self.is_session_expired(url),
+            "session_expired": (
+                self.is_session_expired(url)
+            ),
         }
 
     async def _save_storage_state(
@@ -390,14 +477,21 @@ class BrowserManager:
         project_id: int,
         site: str,
     ) -> None:
-        context = self._contexts.get(project_id)
+        context = self._contexts.get(
+            project_id
+        )
 
         if context is None:
             return
 
-        profile_path = self._profile_path(project_id, site)
+        profile_path = self._profile_path(
+            project_id,
+            site,
+        )
 
-        storage_state = profile_path / "storage_state.json"
+        storage_state = (
+            profile_path / "storage_state.json"
+        )
 
         try:
             await context.storage_state(
@@ -406,7 +500,10 @@ class BrowserManager:
         except Exception:
             pass
 
-    def _get_page(self, project_id: int) -> Page:
+    def _get_page(
+        self,
+        project_id: int,
+    ) -> Page:
         page = self._pages.get(project_id)
 
         if page is None:
@@ -417,7 +514,10 @@ class BrowserManager:
         return page
 
     @classmethod
-    def is_session_expired(cls, url: str) -> bool:
+    def is_session_expired(
+        cls,
+        url: str,
+    ) -> bool:
         if not url:
             return False
 
@@ -438,7 +538,9 @@ class BrowserManager:
         if page is None:
             return False
 
-        return self.is_session_expired(page.url)
+        return self.is_session_expired(
+            page.url
+        )
 
     async def save_session(
         self,
@@ -451,4 +553,6 @@ class BrowserManager:
         )
 
     def active_projects(self) -> list[int]:
-        return list(self._contexts.keys())
+        return list(
+            self._contexts.keys()
+            )
