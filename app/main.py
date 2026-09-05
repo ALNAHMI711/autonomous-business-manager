@@ -84,9 +84,6 @@ class ChatRequest(BaseModel):
     project_id: Optional[int] = None
 
 
-class ProjectCreateRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
-    description: str = Field(default="", max_length=5000)
 
 
 class WorkCardActionRequest(BaseModel):
@@ -99,6 +96,10 @@ class BrowserOpenRequest(BaseModel):
     site: str = Field(min_length=1, max_length=2000)
     url: Optional[str] = Field(default=None, max_length=2000)
 
+class ProjectCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=5000)
+   workflow_type: str = Field(default="assistant", max_length=50)
 
 class BrowserNavigateRequest(BaseModel):
     project_id: int
