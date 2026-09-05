@@ -427,10 +427,11 @@ async def create_project(
     request: ProjectCreateRequest,
     _: str = Depends(_require_session),
 ):
-    project = db.create_project(
-        name=request.name,
-        description=request.description,
-    )
+   project = db.create_project(
+    name=request.name,
+    description=request.description,
+    workflow_type=request.workflow_type,
+   ) 
 
     return {
         "success": True,
