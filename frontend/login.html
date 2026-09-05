@@ -1,149 +1,262 @@
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
-    <meta charset="UTF-8">
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0"
-    >
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-    <title>Autonomous Business Manager</title>
+  <title>مدير الأعمال — تسجيل الدخول</title>
 
-    <link
-        rel="stylesheet"
-        href="/static/style.css"
-    >
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background:
+        radial-gradient(circle at top, #102b4d 0%, #071426 45%, #040b14 100%);
+      color: #eaf2ff;
+      font-family:
+        Arial,
+        "Segoe UI",
+        Tahoma,
+        sans-serif;
+    }
+
+    .login-card {
+      width: min(420px, calc(100% - 32px));
+      padding: 34px;
+      border-radius: 22px;
+      background: rgba(13, 32, 56, 0.96);
+      border: 1px solid #1e3a5f;
+      box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+      text-align: center;
+    }
+
+    .logo {
+      width: 72px;
+      height: 72px;
+      margin: 0 auto 18px;
+      display: grid;
+      place-items: center;
+      border-radius: 20px;
+      background: #0a1c31;
+      border: 1px solid #2b527b;
+      color: #70b7ff;
+      font-size: 38px;
+      box-shadow: 0 10px 30px rgba(24, 119, 242, 0.15);
+    }
+
+    h1 {
+      margin: 0 0 12px;
+      font-size: 25px;
+      font-weight: 700;
+    }
+
+    .welcome {
+      color: #70b7ff;
+      margin-bottom: 12px;
+      font-size: 18px;
+      font-weight: 600;
+    }
+
+    .description {
+      margin: 0;
+      color: #9db3cc;
+      line-height: 1.7;
+      font-size: 14px;
+    }
+
+    form {
+      display: grid;
+      gap: 14px;
+      margin-top: 26px;
+      text-align: right;
+    }
+
+    label {
+      color: #c9d8e8;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    input {
+      width: 100%;
+      padding: 14px;
+      border-radius: 12px;
+      border: 1px solid #2b4a6d;
+      background: #08182b;
+      color: #fff;
+      outline: none;
+      font-size: 15px;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    input::placeholder {
+      color: #60758d;
+    }
+
+    input:focus {
+      border-color: #1877f2;
+      box-shadow: 0 0 0 3px rgba(24, 119, 242, 0.14);
+    }
+
+    button {
+      width: 100%;
+      border: 0;
+      border-radius: 12px;
+      padding: 14px;
+      margin-top: 4px;
+      background: linear-gradient(135deg, #1877f2, #145dcc);
+      color: #fff;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity 0.2s, transform 0.15s;
+    }
+
+    button:hover {
+      opacity: 0.94;
+    }
+
+    button:active {
+      transform: scale(0.99);
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+
+    #error {
+      min-height: 24px;
+      margin-top: 14px;
+      color: #ff8e8e;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .footer {
+      margin-top: 20px;
+      color: #617993;
+      font-size: 12px;
+    }
+  </style>
 </head>
 
-<body class="login-page">
+<body>
 
-    <main class="login-container">
+  <main class="login-card">
 
-        <section class="login-card">
+    <div class="logo">◈</div>
 
-            <div class="brain">
-                🧠
-            </div>
+    <h1>مدير الأعمال المستقل</h1>
 
-            <h1>
-                <°ارحب يا وجه النقاء>°
-            </h1>
+    <div class="welcome">
+      &lt;°ارحب يا وجه النقاء&gt;°
+    </div>
 
-            <p class="login-subtitle">
-                Autonomous Business Manager
-            </p>
+    <p class="description">
+      الدخول إلى مركز التحكم وإدارة مشاريعك ومهامك من مكان واحد.
+    </p>
 
-            <form id="loginForm">
+    <form id="loginForm">
 
-                <label for="password">
-                    كلمة المرور
-                </label>
+      <label for="password">
+        كلمة المرور
+      </label>
 
-                <input
-                    id="password"
-                    name="password"
-                    type="password"
-                    autocomplete="current-password"
-                    placeholder="أدخل كلمة المرور"
-                    required
-                >
+      <input
+        id="password"
+        name="password"
+        type="password"
+        placeholder="أدخل كلمة المرور"
+        autocomplete="current-password"
+        required
+      >
 
-                <button
-                    type="submit"
-                    class="primary-button"
-                >
-                    دخول النظام
-                </button>
+      <button
+        type="submit"
+        id="loginBtn"
+      >
+        دخول
+      </button>
 
-            </form>
+    </form>
 
-            <div
-                id="loginError"
-                class="error-message hidden"
-            ></div>
+    <div id="error" role="alert"></div>
 
-        </section>
+    <div class="footer">
+      نظام إدارة الأعمال الذكي
+    </div>
 
-    </main>
+  </main>
 
-    <script>
-        const form = document.getElementById(
-            "loginForm"
-        );
+  <script>
+    const form = document.getElementById("loginForm");
+    const password = document.getElementById("password");
+    const button = document.getElementById("loginBtn");
+    const error = document.getElementById("error");
 
-        const password = document.getElementById(
-            "password"
-        );
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
 
-        const errorBox = document.getElementById(
-            "loginError"
-        );
+      error.textContent = "";
+      button.disabled = true;
+      button.textContent = "جاري الدخول...";
 
-        form.addEventListener(
-            "submit",
-            async (event) => {
+      try {
+        const response = await fetch("/api/login", {
+          method: "POST",
 
-                event.preventDefault();
+          headers: {
+            "Content-Type": "application/json"
+          },
 
-                errorBox.classList.add(
-                    "hidden"
-                );
+          credentials: "same-origin",
 
-                try {
+          body: JSON.stringify({
+            password: password.value
+          })
+        });
 
-                    const response =
-                        await fetch(
-                            "/api/login",
-                            {
-                                method: "POST",
-                                headers: {
-                                    "Content-Type":
-                                        "application/json"
-                                },
-                                body: JSON.stringify({
-                                    password:
-                                        password.value
-                                })
-                            }
-                        );
+        const data = await response
+          .json()
+          .catch(() => ({}));
 
-                    const data =
-                        await response.json();
+        if (!response.ok) {
+          throw new Error(
+            data.detail || "تعذر تسجيل الدخول"
+          );
+        }
 
-                    if (!response.ok) {
-                        throw new Error(
-                            data.detail ||
-                            "فشل تسجيل الدخول."
-                        );
-                    }
+        /*
+         * لا نحفظ session token في:
+         * localStorage
+         * sessionStorage
+         *
+         * الخادم ينشئ HttpOnly Cookie
+         * بعد نجاح تسجيل الدخول.
+         */
 
-                    /*
-                     * The server returns a session token.
-                     *
-                     * We intentionally keep it in sessionStorage
-                     * rather than localStorage so it disappears
-                     * when the browser session is closed.
-                     */
-                    sessionStorage.setItem(
-                        "abm_session",
-                        data.session
-                    );
+        window.location.href = "/dashboard";
 
-                    window.location.href =
-                        "/dashboard";
+      } catch (errorObject) {
 
-                } catch (error) {
+        error.textContent =
+          errorObject.message ||
+          "حدث خطأ أثناء تسجيل الدخول.";
 
-                    errorBox.textContent =
-                        error.message;
+      } finally {
 
-                    errorBox.classList.remove(
-                        "hidden"
-                    );
-                }
-            }
-        );
-    </script>
+        button.disabled = false;
+        button.textContent = "دخول";
+      }
+    });
+  </script>
 
 </body>
-</html>
+    </html>
