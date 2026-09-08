@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - codex/engineering-network-v3
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -38,6 +41,7 @@ jobs:
         run: pytest -q
 
       - name: Commit generated engineering changes
+        if: github.event_name == 'push'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
