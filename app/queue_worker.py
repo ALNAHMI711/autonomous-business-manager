@@ -70,7 +70,7 @@ class PersistentQueueWorker:
                     break
                 if status == "paused":
                     # A paused card must not be auto-resumed by the worker.
-                    self.queue.cancel(task_id, reason="execution_paused")
+                    self.queue.cancel(task_id)
                     break
                 await asyncio.sleep(0.1)
         except asyncio.CancelledError:
