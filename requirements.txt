@@ -10,3 +10,4 @@ cryptography>=43.0,<47.0
 playwright>=1.45,<2.0
 
 python-multipart>=0.0.9,<1.0
+pytest-asyncio>=0.24,<1.0
