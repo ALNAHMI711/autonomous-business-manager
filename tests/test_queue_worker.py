@@ -56,6 +56,21 @@ async def test_worker_start_stop_is_idempotent(tmp_path):
 
     await worker.stop()
     assert worker._task is None
-
-    # No leaked asyncio task should remain after shutdown.
     await asyncio.sleep(0)
+
+
+def test_recover_stale_requeues_abandoned_claim(tmp_path):
+    queue = PersistentTaskQueue(tmp_path / "queue.db")
+    queue.enqueue(99)
+    claimed = queue.claim_next()
+    assert claimed["status"] == "running"
+
+    with queue._connect() as connection:
+        connection.execute(
+            "UPDATE task_queue SET claimed_at=?, updated_at=? WHERE task_id=?",
+            ("2000-01-01T00:00:00+00:00", "2000-01-01T00:00:00+00:00", 99),
+        )
+
+    assert queue.recover_stale(max_age_seconds=60) == 1
+    assert queue.get(99)["status"] == "queued"
+    assert queue.get(99)["error_message"] == "recovered_after_restart"
