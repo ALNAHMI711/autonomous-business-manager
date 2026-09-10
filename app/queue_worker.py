@@ -10,18 +10,11 @@ logger = logging.getLogger(__name__)
 
 
 class PersistentQueueWorker:
-    """Durable dispatcher that delegates execution to TaskManager.
+    """Durable dispatcher; TaskManager remains the execution boundary."""
 
-    The worker is deliberately small: SQLite owns queue state, while
-    TaskManager remains the single execution/risk boundary.
-    """
+    TERMINAL = {"completed", "error", "stopped"}
 
-    def __init__(
-        self,
-        queue: PersistentTaskQueue,
-        task_manager: Any,
-        poll_interval: float = 1.0,
-    ) -> None:
+    def __init__(self, queue: PersistentTaskQueue, task_manager: Any, poll_interval: float = 1.0) -> None:
         self.queue = queue
         self.task_manager = task_manager
         self.poll_interval = max(0.1, poll_interval)
@@ -31,6 +24,7 @@ class PersistentQueueWorker:
     async def start(self) -> None:
         if self._task and not self._task.done():
             return
+        self.queue.recover_stale()
         self._stop.clear()
         self._task = asyncio.create_task(self._loop(), name="persistent-queue-worker")
 
@@ -49,14 +43,27 @@ class PersistentQueueWorker:
         claimed = self.queue.claim_next()
         if claimed is None:
             return None
-
         task_id = int(claimed["task_id"])
         try:
             accepted = await self.task_manager.run(task_id)
-            if accepted:
-                self.queue.complete(task_id)
-            else:
+            if not accepted:
                 self.queue.fail(task_id, "TaskManager rejected execution")
+                return claimed
+            # TaskManager.run() starts an asyncio task and returns immediately.
+            # Poll the durable source of truth so queue completion reflects real execution.
+            while not self._stop.is_set():
+                card = self.task_manager.db.get_work_card(task_id)
+                status = str(card.get("status", "")) if card else "error"
+                if status == "completed":
+                    self.queue.complete(task_id)
+                    break
+                if status in {"error", "stopped"}:
+                    self.queue.fail(task_id, str(card.get("error_message", "execution_failed")) if card else "task_missing")
+                    break
+                if status == "paused":
+                    self.queue.fail(task_id, "execution_paused", retry_at=self.queue._now())
+                    break
+                await asyncio.sleep(0.1)
         except asyncio.CancelledError:
             self.queue.fail(task_id, "worker cancelled")
             raise
