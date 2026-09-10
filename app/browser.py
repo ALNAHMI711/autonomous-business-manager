@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 from playwright.async_api import (
@@ -49,6 +49,7 @@ class BrowserManager:
         self._browser: Browser | None = None
         self._contexts: dict[int, BrowserContext] = {}
         self._pages: dict[int, Page] = {}
+        self._network_profiles: dict[int, str] = {}
 
     async def initialize(self) -> None:
         if self._playwright is not None:
@@ -140,6 +141,8 @@ class BrowserManager:
         self,
         project_id: int,
         site: str,
+        proxy: Optional[dict[str, Any]] = None,
+        network_profile_name: Optional[str] = None,
     ) -> dict[str, Any]:
         await self.initialize()
 
@@ -151,6 +154,10 @@ class BrowserManager:
         site = self._validate_url(site)
 
         existing = self._contexts.get(project_id)
+
+        if existing is not None and self._network_profiles.get(project_id) != network_profile_name:
+            await self.close_project(project_id)
+            existing = None
 
         if existing is not None:
             pages = existing.pages
@@ -188,6 +195,9 @@ class BrowserManager:
             "locale": "ar-SA",
         }
 
+        if proxy:
+            context_kwargs["proxy"] = proxy
+
         if storage_state.exists():
             context_kwargs["storage_state"] = str(
                 storage_state
@@ -201,6 +211,7 @@ class BrowserManager:
 
         self._contexts[project_id] = context
         self._pages[project_id] = page
+        self._network_profiles[project_id] = network_profile_name or "direct"
 
         try:
             await page.goto(
@@ -322,6 +333,7 @@ class BrowserManager:
             project_id,
             None,
         )
+        self._network_profiles.pop(project_id, None)
 
         if context is None:
             return

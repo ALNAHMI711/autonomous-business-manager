@@ -18,6 +18,7 @@ from app.config import settings
 from app.connectivity import ConnectivityMonitor
 from app.database import Database
 from app.notifications import NotificationManager
+from app.network import NetworkManager, NetworkProfile
 from app.security import SecurityManager
 from app.task_manager import TaskManager
 
@@ -34,6 +35,11 @@ STATIC_DIR = FRONTEND_DIR / "static"
 db = Database(settings.database_path)
 
 security = SecurityManager(settings)
+
+network_manager = NetworkManager(
+    database=db,
+    security=security,
+)
 
 agent = Agent(
     database=db,
@@ -95,11 +101,25 @@ class BrowserOpenRequest(BaseModel):
     project_id: int
     site: str = Field(min_length=1, max_length=2000)
     url: Optional[str] = Field(default=None, max_length=2000)
+    network_profile: Optional[str] = Field(default=None, max_length=80)
+
+
+class NetworkProfileRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    mode: str = Field(default="direct", max_length=20)
+    proxy_server: str = Field(default="", max_length=500)
+    username: str = Field(default="", max_length=200)
+    password: str = Field(default="", max_length=500)
+    bypass: str = Field(default="", max_length=1000)
+
+
+class NetworkTestRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
 
 class ProjectCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=5000)
-   workflow_type: str = Field(default="assistant", max_length=50)
+    workflow_type: str = Field(default="assistant", max_length=50)
 
 class BrowserNavigateRequest(BaseModel):
     project_id: int
@@ -427,11 +447,11 @@ async def create_project(
     request: ProjectCreateRequest,
     _: str = Depends(_require_session),
 ):
-   project = db.create_project(
-    name=request.name,
-    description=request.description,
-    workflow_type=request.workflow_type,
-   ) 
+    project = db.create_project(
+        name=request.name,
+        description=request.description,
+        workflow_type=request.workflow_type,
+    )
 
     return {
         "success": True,
@@ -778,6 +798,54 @@ async def system_status(
 
 
 # ================================================================
+# الشبكة ومسارات الخروج
+# ================================================================
+
+@app.get("/api/network/profiles")
+async def network_profiles(_: str = Depends(_require_session)):
+    return {"profiles": network_manager.list_profiles()}
+
+
+@app.post("/api/network/profiles")
+async def save_network_profile(request: NetworkProfileRequest, _: str = Depends(_require_session)):
+    try:
+        profile = NetworkProfile(name=request.name.strip(), mode=request.mode.strip().lower(), proxy_server=request.proxy_server.strip(), username=request.username.strip(), password=request.password, bypass=request.bypass.strip())
+        return {"success": True, "profile": network_manager.save_profile(profile)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/network/profiles/{name}")
+async def delete_network_profile(name: str, _: str = Depends(_require_session)):
+    return {"success": network_manager.delete_profile(name)}
+
+
+@app.post("/api/network/test")
+async def test_network_profile(request: NetworkTestRequest, _: str = Depends(_require_session)):
+    try:
+        return await network_manager.test_profile(request.name)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/projects/{project_id}/network")
+async def bind_project_network(project_id: int, profile_name: Optional[str] = None, _: str = Depends(_require_session)):
+    _require_project(project_id)
+    try:
+        network_manager.bind_project(project_id, profile_name)
+        return {"success": True, "profile": profile_name or "direct"}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/projects/{project_id}/network")
+async def get_project_network(project_id: int, _: str = Depends(_require_session)):
+    _require_project(project_id)
+    profile = network_manager.get_project_profile(project_id)
+    return {"profile": profile.masked() if profile else {"name": "direct", "mode": "direct"}}
+
+
+# ================================================================
 # المتصفح
 # ================================================================
 
@@ -807,10 +875,9 @@ async def browser_open(
     target = request.url or request.site
 
     try:
-        result = await browser.open_project(
-            project_id=request.project_id,
-            site=target,
-        )
+        profile = (network_manager.get_profile(request.network_profile) if request.network_profile else network_manager.get_project_profile(request.project_id))
+        profile_name = profile.name if profile else "direct"
+        result = await browser.open_project(project_id=request.project_id, site=target, proxy=profile.to_playwright_proxy() if profile else None, network_profile_name=profile_name)
 
         return {
             "success": True,
