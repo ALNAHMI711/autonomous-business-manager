@@ -992,3 +992,41 @@ document.addEventListener(
   initialize
 );
 
+
+
+async function loadNetworkProfiles() {
+  const data = await api("/api/network/profiles");
+  const select = $("networkProfile");
+  if (!select) return;
+  select.innerHTML = '<option value="">مباشر (إنترنت الجهاز)</option>';
+  for (const profile of data.profiles || []) {
+    const option = document.createElement("option");
+    option.value = profile.name;
+    option.textContent = `${profile.name} — ${profile.mode}${profile.proxy_server ? ` — ${profile.proxy_server}` : ""}`;
+    select.appendChild(option);
+  }
+}
+async function saveNetworkProfile() {
+  const payload = {name: $("networkName").value.trim(), mode: $("networkMode").value, proxy_server: $("networkProxy").value.trim(), username: $("networkUsername").value.trim(), password: $("networkPassword").value, bypass: $("networkBypass").value.trim()};
+  const data = await api("/api/network/profiles", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)});
+  $("networkResult").textContent = `تم حفظ ${data.profile.name}.`;
+  $("networkPassword").value = "";
+  await loadNetworkProfiles();
+  $("networkProfile").value = data.profile.name;
+}
+async function testNetworkProfile() {
+  const name = $("networkProfile").value || $("networkName").value.trim();
+  const data = await api("/api/network/test", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({name})});
+  $("networkResult").textContent = `IP العام المرصود: ${data.observed_public_ip || "غير متاح"}`;
+}
+async function bindNetworkToProject() {
+  const projectId = Number($("browserProject").value);
+  if (!projectId) throw new Error("اختر المشروع أولاً.");
+  const profile = $("networkProfile").value || null;
+  await api(`/api/projects/${projectId}/network${profile ? `?profile_name=${encodeURIComponent(profile)}` : ""}`, {method:"POST"});
+  $("networkResult").textContent = `تم ربط المشروع بمسار ${profile || "direct"}.`;
+}
+$("networkSaveBtn")?.addEventListener("click", async () => {try {await saveNetworkProfile(); showToast("تم حفظ ملف الشبكة", "success");} catch (e) {showToast(e.message, "error");}});
+$("networkTestBtn")?.addEventListener("click", async () => {try {await testNetworkProfile(); showToast("تم اختبار الشبكة", "success");} catch (e) {showToast(e.message, "error");}});
+$("networkBindBtn")?.addEventListener("click", async () => {try {await bindNetworkToProject(); showToast("تم ربط الشبكة", "success");} catch (e) {showToast(e.message, "error");}});
+loadNetworkProfiles().catch(() => {});

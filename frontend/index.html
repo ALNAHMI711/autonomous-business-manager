@@ -138,7 +138,21 @@
     <section class="dashboard-grid">
 
       <div class="panel">
+        <div class="panel-header"><div><h2>الشبكة / IP</h2><p>مباشر عبر الجهاز أو Proxy للمشروع. الـVPN الحقيقي يبقى مسؤولية نظام الهاتف.</p></div></div>
+        <div class="form-grid">
+          <label>الملف<select id="networkProfile"><option value="">مباشر (إنترنت الجهاز)</option></select></label>
+          <label>الاسم<input id="networkName" value="phone-direct"></label>
+          <label>الوضع<select id="networkMode"><option value="direct">مباشر</option><option value="proxy">Proxy</option></select></label>
+          <label>Proxy Server<input id="networkProxy" placeholder="socks5://127.0.0.1:1080"></label>
+          <label>المستخدم<input id="networkUsername"></label>
+          <label>كلمة مرور Proxy<input id="networkPassword" type="password"></label>
+          <label>Bypass<input id="networkBypass"></label>
+        </div>
+        <div class="button-row"><button id="networkSaveBtn" class="primary-btn">حفظ</button><button id="networkTestBtn" class="secondary-btn">اختبار IP</button><button id="networkBindBtn" class="secondary-btn">ربط بالمشروع</button></div>
+        <div id="networkResult" class="result-box">لم يتم الاختبار.</div>
+      </div>
 
+      <div class="panel">
         <div class="panel-header">
           <div>
             <h2>المتصفح</h2>

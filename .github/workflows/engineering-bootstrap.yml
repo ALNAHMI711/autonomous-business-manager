@@ -1,0 +1,50 @@
+name: Engineering Bootstrap
+
+on:
+  push:
+    branches:
+      - codex/engineering-network-v3
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      - name: Apply engineering patch
+        run: python scripts/bootstrap_engineering.py
+
+      - name: Compile check
+        run: python -m compileall -q app
+
+      - name: Unit tests
+        run: pytest -q
+
+      - name: Commit generated engineering changes
+        if: github.event_name == 'push'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app frontend requirements.txt ENGINEERING_AUDIT.md
+          git diff --cached --quiet || git commit -m "feat: add project network routing and engineering baseline"
+          git push origin HEAD:codex/engineering-network-v3
