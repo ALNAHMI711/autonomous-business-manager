@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>تحكم التشغيل — Autonomous Business Manager</title>
+  <style>
+    body{margin:0;background:#0b0f14;color:#f4f7fb;font-family:system-ui,-apple-system,sans-serif;padding:20px}
+    .wrap{max-width:720px;margin:auto}.card{background:#121923;border:1px solid #263244;border-radius:18px;padding:20px;box-shadow:0 12px 35px #0005}
+    h1{margin-top:0}.status{padding:14px;border-radius:12px;background:#182231;margin:14px 0;font-weight:700}
+    .actions{display:grid;grid-template-columns:1fr 1fr;gap:12px}.btn{border:0;border-radius:14px;padding:16px;font-size:18px;font-weight:800;cursor:pointer}
+    .pause{background:#d69e2e;color:#111}.resume{background:#38a169;color:white}.refresh{background:#2d3748;color:white;width:100%;margin-top:12px}
+    pre{white-space:pre-wrap;background:#0a0e13;padding:14px;border-radius:12px;min-height:80px}
+  </style>
+</head>
+<body>
+<div class="wrap"><div class="card">
+  <h1>🎛️ تحكم التشغيل</h1>
+  <div id="status" class="status">جاري قراءة الحالة...</div>
+  <div class="actions">
+    <button id="pause" class="btn pause">⏸️ إيقاف مؤقت</button>
+    <button id="resume" class="btn resume">▶️ تشغيل / استئناف</button>
+  </div>
+  <button id="refresh" class="btn refresh">🔄 تحديث الحالة</button>
+  <pre id="log"></pre>
+</div></div>
+<script>
+const statusEl=document.getElementById('status'),logEl=document.getElementById('log');
+async function api(path,options={}){const r=await fetch(path,{credentials:'same-origin',headers:{'Content-Type':'application/json'},...options});if(!r.ok)throw new Error((await r.text())||('HTTP '+r.status));return r.json()}
+async function cards(){return (await api('/api/work-cards')).work_cards||[]}
+async function refresh(){try{const c=await cards();const counts=c.reduce((a,x)=>(a[x.status]=(a[x.status]||0)+1,a),{});statusEl.textContent=`الحالة: 🟢 متاح | تشغيل: ${counts.running||0} | مؤقت: ${counts.paused||0} | انتظار: ${counts.queued||0}`;return c}catch(e){statusEl.textContent='🔴 تعذر قراءة الحالة — تأكد من تسجيل الدخول';throw e}}
+async function control(action){try{const c=await cards();let selected=c.filter(x=>['running','queued','paused'].includes(String(x.status).toLowerCase()));if(action==='pause')selected=c.filter(x=>['running','queued'].includes(String(x.status).toLowerCase()));let ok=0;for(const x of selected){const r=await api('/api/work-cards/'+x.id+'/action',{method:'POST',body:JSON.stringify({action,note:'تحكم عام من لوحة التشغيل'})});if(r.success)ok++}logEl.textContent=`تم تنفيذ ${action==='pause'?'الإيقاف المؤقت':'الاستئناف'} على ${ok} مهمة.`;await refresh()}catch(e){logEl.textContent='خطأ: '+e.message;}}
+document.getElementById('pause').onclick=()=>control('pause');document.getElementById('resume').onclick=()=>control('resume');document.getElementById('refresh').onclick=refresh;refresh();
+</script>
+</body></html>
