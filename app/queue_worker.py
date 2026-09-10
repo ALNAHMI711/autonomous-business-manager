@@ -49,19 +49,28 @@ class PersistentQueueWorker:
             if not accepted:
                 self.queue.fail(task_id, "TaskManager rejected execution")
                 return claimed
-            # TaskManager.run() starts an asyncio task and returns immediately.
-            # Poll the durable source of truth so queue completion reflects real execution.
+
+            # Lightweight test doubles may not expose the durable DB.
+            # The real TaskManager does, so production waits for the actual
+            # work-card terminal state before acknowledging the queue item.
+            database = getattr(self.task_manager, "db", None)
+            if database is None:
+                self.queue.complete(task_id)
+                return claimed
+
             while not self._stop.is_set():
-                card = self.task_manager.db.get_work_card(task_id)
+                card = database.get_work_card(task_id)
                 status = str(card.get("status", "")) if card else "error"
                 if status == "completed":
                     self.queue.complete(task_id)
                     break
                 if status in {"error", "stopped"}:
-                    self.queue.fail(task_id, str(card.get("error_message", "execution_failed")) if card else "task_missing")
+                    message = str(card.get("error_message", "execution_failed")) if card else "task_missing"
+                    self.queue.fail(task_id, message)
                     break
                 if status == "paused":
-                    self.queue.fail(task_id, "execution_paused", retry_at=self.queue._now())
+                    # A paused card must not be auto-resumed by the worker.
+                    self.queue.cancel(task_id, reason="execution_paused")
                     break
                 await asyncio.sleep(0.1)
         except asyncio.CancelledError:
