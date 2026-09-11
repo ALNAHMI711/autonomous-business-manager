@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.agent import Agent
+from app.auth_compat import PersistentSessionSet
 from app.approval import ApprovalManager
 from app.browser import BrowserManager
 from app.code_analyzer import CodeAnalyzer
@@ -74,7 +75,7 @@ task_manager = TaskManager(
 )
 
 
-_active_sessions: set[str] = set()
+_active_sessions = PersistentSessionSet()
 
 
 # ================================================================
@@ -241,6 +242,11 @@ async def lifespan(app: FastAPI):
     settings.ensure_directories()
 
     db.initialize()
+
+    try:
+        _active_sessions.purge()
+    except Exception:
+        pass
 
     try:
         await browser.initialize()
