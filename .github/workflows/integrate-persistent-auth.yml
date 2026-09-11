@@ -39,6 +39,7 @@ jobs:
           PY
       - name: Validate
         run: |
+          python -m pip install -r requirements.txt pytest
           python -m compileall -q app
           pytest -q
       - name: Commit integration and remove one-shot workflow
