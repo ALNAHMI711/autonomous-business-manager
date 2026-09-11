@@ -70,6 +70,8 @@ async def _lifespan(application):
 
 # Production runs through this module, so install CSRF protection here
 # without rewriting the large route module in app.main.
+if settings.app_env.lower() == "production" and not settings.csrf_secret:
+    raise RuntimeError("CSRF_SECRET must be configured in production")
 if settings.csrf_secret:
     app.add_middleware(CSRFSecurityMiddleware, secret=settings.csrf_secret)
 
