@@ -85,7 +85,10 @@ class LoginRateLimiter:
             )
             conn.commit()
         if locked_until:
-            return False, self.window_seconds
+            # Keep the return value aligned with the endpoint contract:
+            # the second value is remaining attempts, while check() returns
+            # the retry-after duration for an already-locked client.
+            return False, 0
         return True, self.max_failures - failures
 
     def record_success(self, client_key: str) -> None:
