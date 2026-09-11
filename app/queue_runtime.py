@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 from app.main import app, db, task_manager, settings
+from app.csrf_middleware import CSRFSecurityMiddleware
 from app.persistent_queue import PersistentTaskQueue
 from app.queue_worker import PersistentQueueWorker
 
@@ -66,5 +67,10 @@ async def _lifespan(application):
         finally:
             await worker.stop()
 
+
+# Production runs through this module, so install CSRF protection here
+# without rewriting the large route module in app.main.
+if settings.csrf_secret:
+    app.add_middleware(CSRFSecurityMiddleware, secret=settings.csrf_secret)
 
 app.router.lifespan_context = _lifespan
