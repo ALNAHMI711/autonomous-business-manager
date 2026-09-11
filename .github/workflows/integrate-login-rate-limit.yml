@@ -1,0 +1,45 @@
+name: Integrate login rate limiting
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    if: github.event.head_commit.message != 'chore: remove one-shot login rate limit workflow'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch main
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('app/main.py')
+          s = p.read_text()
+          s = s.replace('from app.security import SecurityManager\n', 'from app.security import SecurityManager\nfrom app.rate_limit import LoginRateLimiter\n', 1)
+          s = s.replace('_active_sessions = PersistentSessionSet()\n', '_active_sessions = PersistentSessionSet()\n_login_rate_limiter = LoginRateLimiter(settings.database_path, max_failures=5, window_seconds=300)\n', 1)
+          old = '''async def login(\n    request: LoginRequest,\n):\n    if not _verify_admin_password(\n        request.password\n    ):\n        raise HTTPException(\n            status_code=401,\n            detail="كلمة المرور غير صحيحة.",\n        )\n'''
+          new = '''async def login(\n    request: LoginRequest,\n    http_request: Request,\n):\n    client_key = http_request.client.host if http_request.client else "unknown"\n    allowed, retry_after = _login_rate_limiter.check(client_key)\n    if not allowed:\n        try:\n            db.create_event(\n                event_type="security_login_rate_limited",\n                message="تم رفض محاولة دخول بسبب تجاوز حد المحاولات.",\n                metadata={"client_key": client_key, "retry_after": retry_after},\n            )\n        except Exception:\n            pass\n        raise HTTPException(\n            status_code=429,\n            detail="تم تجاوز عدد محاولات الدخول. حاول لاحقاً.",\n            headers={"Retry-After": str(retry_after)},\n        )\n\n    if not _verify_admin_password(\n        request.password\n    ):\n        _, remaining = _login_rate_limiter.record_failure(client_key)\n        try:\n            db.create_event(\n                event_type="security_login_failed",\n                message="فشلت محاولة تسجيل دخول.",\n                metadata={"client_key": client_key, "remaining_attempts": remaining},\n            )\n        except Exception:\n            pass\n        if remaining == 0:\n            raise HTTPException(\n                status_code=429,\n                detail="تم تجاوز عدد محاولات الدخول. حاول لاحقاً.",\n                headers={"Retry-After": "300"},\n            )\n        raise HTTPException(\n            status_code=401,\n            detail="كلمة المرور غير صحيحة.",\n        )\n\n    _login_rate_limiter.record_success(client_key)\n'''
+          if old not in s:
+              raise SystemExit('login anchor not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+      - name: Validate
+        run: |
+          python -m pip install -r requirements.txt pytest
+          python -m compileall -q app
+          pytest -q
+      - name: Commit and remove workflow
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add app/main.py tests/test_rate_limit.py app/rate_limit.py
+          git commit -m 'security: enforce durable login rate limiting' || true
+          rm -f .github/workflows/integrate-login-rate-limit.yml
+          git add .github/workflows/integrate-login-rate-limit.yml
+          git commit -m 'chore: remove one-shot login rate limit workflow' || true
+          git push
