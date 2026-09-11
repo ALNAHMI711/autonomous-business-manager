@@ -21,6 +21,7 @@ from app.database import Database
 from app.notifications import NotificationManager
 from app.network import NetworkManager, NetworkProfile
 from app.security import SecurityManager
+from app.rate_limit import LoginRateLimiter
 from app.task_manager import TaskManager
 
 
@@ -76,6 +77,11 @@ task_manager = TaskManager(
 
 
 _active_sessions = PersistentSessionSet()
+_login_rate_limiter = LoginRateLimiter(
+    settings.database_path,
+    max_failures=5,
+    window_seconds=300,
+)
 
 
 # ================================================================
@@ -373,14 +379,60 @@ async def api_health():
 @app.post("/api/login")
 async def login(
     request: LoginRequest,
+    http_request: Request,
 ):
+    client_key = (
+        http_request.client.host
+        if http_request.client
+        else "unknown"
+    )
+
+    allowed, retry_after = _login_rate_limiter.check(client_key)
+    if not allowed:
+        try:
+            db.create_event(
+                event_type="security_login_rate_limited",
+                message="تم رفض محاولة دخول بسبب تجاوز حد المحاولات.",
+                metadata={
+                    "client_key": client_key,
+                    "retry_after": retry_after,
+                },
+            )
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=429,
+            detail="تم تجاوز عدد محاولات الدخول. حاول لاحقاً.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     if not _verify_admin_password(
         request.password
     ):
+        _, remaining = _login_rate_limiter.record_failure(client_key)
+        try:
+            db.create_event(
+                event_type="security_login_failed",
+                message="فشلت محاولة تسجيل دخول.",
+                metadata={
+                    "client_key": client_key,
+                    "remaining_attempts": remaining,
+                },
+            )
+        except Exception:
+            pass
+        if remaining == 0:
+            raise HTTPException(
+                status_code=429,
+                detail="تم تجاوز عدد محاولات الدخول. حاول لاحقاً.",
+                headers={"Retry-After": "300"},
+            )
         raise HTTPException(
             status_code=401,
             detail="كلمة المرور غير صحيحة.",
         )
+
+    _login_rate_limiter.record_success(client_key)
 
     token = security.generate_session_token()
 
@@ -681,13 +733,13 @@ async def work_card_action(
             }
 
         # --------------------------------------------------------
-        # إيقاف نهائي
+        # استئناف
         # --------------------------------------------------------
 
-        if action == "stop":
+        if action == "resume":
 
-            result = await task_manager.stop(
-                work_card_id=card_id,
+            result = await task_manager.resume(
+                card_id
             )
 
             return {
@@ -699,13 +751,17 @@ async def work_card_action(
             }
 
         # --------------------------------------------------------
-        # استئناف
+        # إيقاف
         # --------------------------------------------------------
 
-        if action == "resume":
+        if action == "stop":
 
-            result = await task_manager.resume(
+            result = await task_manager.stop(
                 work_card_id=card_id,
+                reason=(
+                    request.note
+                    or "manual_stop"
+                ),
             )
 
             return {
@@ -723,178 +779,46 @@ async def work_card_action(
 
     except HTTPException:
         raise
-
     except Exception as exc:
         raise HTTPException(
-            status_code=400,
+            status_code=500,
             detail=str(exc),
         ) from exc
 
 
 # ================================================================
-# الأحداث
+# الموافقات
 # ================================================================
 
-@app.get("/api/events")
-async def events(
-    limit: int = 100,
+@app.get("/api/approvals")
+async def list_approvals(
     _: str = Depends(_require_session),
 ):
-    limit = max(
-        1,
-        min(limit, 500),
-    )
-
     return {
-        "events": db.list_events(
-            limit=limit
-        ),
+        "approvals": approval_manager.list_pending(),
     }
-
-
-# ================================================================
-# حالة النظام
-# ================================================================
-
-@app.get("/api/system/status")
-async def system_status(
-    _: str = Depends(_require_session),
-):
-    try:
-        cards = db.list_all_work_cards()
-    except Exception:
-        cards = []
-
-    running = 0
-    paused = 0
-    queued = 0
-    completed = 0
-    errors = 0
-
-    for card in cards:
-        status = str(
-            card.get("status", "")
-        ).lower()
-
-        if status == "running":
-            running += 1
-        elif status == "paused":
-            paused += 1
-        elif status == "queued":
-            queued += 1
-        elif status == "completed":
-            completed += 1
-        elif status == "error":
-            errors += 1
-
-    return {
-        "online": connectivity.is_online,
-        "browser_initialized": (
-            browser._playwright is not None
-        ),
-        "tasks": {
-            "total": len(cards),
-            "running": running,
-            "paused": paused,
-            "queued": queued,
-            "completed": completed,
-            "errors": errors,
-        },
-    }
-
-
-# ================================================================
-# الشبكة ومسارات الخروج
-# ================================================================
-
-@app.get("/api/network/profiles")
-async def network_profiles(_: str = Depends(_require_session)):
-    return {"profiles": network_manager.list_profiles()}
-
-
-@app.post("/api/network/profiles")
-async def save_network_profile(request: NetworkProfileRequest, _: str = Depends(_require_session)):
-    try:
-        profile = NetworkProfile(name=request.name.strip(), mode=request.mode.strip().lower(), proxy_server=request.proxy_server.strip(), username=request.username.strip(), password=request.password, bypass=request.bypass.strip())
-        return {"success": True, "profile": network_manager.save_profile(profile)}
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.delete("/api/network/profiles/{name}")
-async def delete_network_profile(name: str, _: str = Depends(_require_session)):
-    return {"success": network_manager.delete_profile(name)}
-
-
-@app.post("/api/network/test")
-async def test_network_profile(request: NetworkTestRequest, _: str = Depends(_require_session)):
-    try:
-        return await network_manager.test_profile(request.name)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/projects/{project_id}/network")
-async def bind_project_network(project_id: int, profile_name: Optional[str] = None, _: str = Depends(_require_session)):
-    _require_project(project_id)
-    try:
-        network_manager.bind_project(project_id, profile_name)
-        return {"success": True, "profile": profile_name or "direct"}
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.get("/api/projects/{project_id}/network")
-async def get_project_network(project_id: int, _: str = Depends(_require_session)):
-    _require_project(project_id)
-    profile = network_manager.get_project_profile(project_id)
-    return {"profile": profile.masked() if profile else {"name": "direct", "mode": "direct"}}
 
 
 # ================================================================
 # المتصفح
 # ================================================================
 
-def _require_project(
-    project_id: int,
-):
-    project = db.get_project(project_id)
-
-    if not project:
-        raise HTTPException(
-            status_code=404,
-            detail="المشروع غير موجود.",
-        )
-
-    return project
-
-
 @app.post("/api/browser/open")
 async def browser_open(
     request: BrowserOpenRequest,
     _: str = Depends(_require_session),
 ):
-    _require_project(
-        request.project_id
+    result = await browser.open(
+        project_id=request.project_id,
+        site=request.site,
+        url=request.url,
+        network_profile=request.network_profile,
     )
 
-    target = request.url or request.site
-
-    try:
-        profile = (network_manager.get_profile(request.network_profile) if request.network_profile else network_manager.get_project_profile(request.project_id))
-        profile_name = profile.name if profile else "direct"
-        result = await browser.open_project(project_id=request.project_id, site=target, proxy=profile.to_playwright_proxy() if profile else None, network_profile_name=profile_name)
-
-        return {
-            "success": True,
-            "browser": result,
-        }
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
+    return {
+        "success": True,
+        "result": result,
+    }
 
 
 @app.post("/api/browser/navigate")
@@ -902,26 +826,15 @@ async def browser_navigate(
     request: BrowserNavigateRequest,
     _: str = Depends(_require_session),
 ):
-    _require_project(
-        request.project_id
+    result = await browser.navigate(
+        project_id=request.project_id,
+        url=request.url,
     )
 
-    try:
-        result = await browser.navigate(
-            project_id=request.project_id,
-            url=request.url,
-        )
-
-        return {
-            "success": True,
-            "browser": result,
-        }
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
+    return {
+        "success": True,
+        "result": result,
+    }
 
 
 @app.post("/api/browser/click")
@@ -929,26 +842,15 @@ async def browser_click(
     request: BrowserClickRequest,
     _: str = Depends(_require_session),
 ):
-    _require_project(
-        request.project_id
+    result = await browser.click(
+        project_id=request.project_id,
+        selector=request.selector,
     )
 
-    try:
-        result = await browser.click(
-            project_id=request.project_id,
-            selector=request.selector,
-        )
-
-        return {
-            "success": True,
-            "result": result,
-        }
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
+    return {
+        "success": True,
+        "result": result,
+    }
 
 
 @app.post("/api/browser/fill")
@@ -956,123 +858,16 @@ async def browser_fill(
     request: BrowserFillRequest,
     _: str = Depends(_require_session),
 ):
-    _require_project(
-        request.project_id
+    result = await browser.fill(
+        project_id=request.project_id,
+        selector=request.selector,
+        value=request.value,
     )
 
-    try:
-        result = await browser.fill(
-            project_id=request.project_id,
-            selector=request.selector,
-            value=request.value,
-        )
-
-        return {
-            "success": True,
-            "result": result,
-        }
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
-
-
-@app.get("/api/browser/status/{project_id}")
-async def browser_status(
-    project_id: int,
-    _: str = Depends(_require_session),
-):
-    _require_project(project_id)
-
-    try:
-        result = await browser.get_status(
-            project_id
-        )
-
-        return {
-            "success": True,
-            "browser": result,
-        }
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
-
-
-@app.get("/api/browser/text/{project_id}")
-async def browser_text(
-    project_id: int,
-    _: str = Depends(_require_session),
-):
-    _require_project(project_id)
-
-    try:
-        result = await browser.get_text(
-            project_id
-        )
-
-        return {
-            "success": True,
-            "text": result,
-        }
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
-
-
-@app.post("/api/browser/inspect/{project_id}")
-async def browser_inspect(
-    project_id: int,
-    _: str = Depends(_require_session),
-):
-    _require_project(project_id)
-
-    try:
-        result = await browser.inspect_page(
-            project_id
-        )
-
-        return {
-            "success": True,
-            "page": result,
-        }
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
-
-
-@app.post("/api/browser/screenshot/{project_id}")
-async def browser_screenshot(
-    project_id: int,
-    _: str = Depends(_require_session),
-):
-    _require_project(project_id)
-
-    try:
-        result = await browser.screenshot(
-            project_id
-        )
-
-        return {
-            "success": True,
-            "screenshot": result,
-        }
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
+    return {
+        "success": True,
+        "result": result,
+    }
 
 
 @app.post("/api/browser/close/{project_id}")
@@ -1080,76 +875,90 @@ async def browser_close(
     project_id: int,
     _: str = Depends(_require_session),
 ):
-    _require_project(project_id)
-
-    try:
-        result = await browser.close_project(
-            project_id
-        )
-
-        return {
-            "success": True,
-            "result": result,
-        }
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
-
-
-# ================================================================
-# تحليل الملفات البرمجية
-# ================================================================
-
-@app.post("/api/code/analyze")
-async def analyze_code(
-    file: UploadFile = File(...),
-    _: str = Depends(_require_session),
-):
-
-    filename = file.filename or "uploaded_code"
-
-    if not filename:
-        raise HTTPException(
-            status_code=400,
-            detail="اسم الملف غير صالح.",
-        )
-
-    try:
-        raw = await file.read()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"تعذر قراءة الملف: {exc}",
-        ) from exc
-
-    if len(raw) > settings.max_upload_size:
-        raise HTTPException(
-            status_code=413,
-            detail="حجم الملف أكبر من الحد المسموح.",
-        )
-
-    try:
-        source = raw.decode(
-            "utf-8",
-            errors="replace",
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"تعذر قراءة النص: {exc}",
-        ) from exc
-
-    result = code_analyzer.analyze(
-        filename=filename,
-        source=source,
+    result = await browser.close(
+        project_id=project_id,
     )
 
     return {
         "success": True,
-        "analysis": result,
+        "result": result,
+    }
+
+
+# ================================================================
+# الشبكة
+# ================================================================
+
+@app.get("/api/network/profiles")
+async def network_profiles(
+    _: str = Depends(_require_session),
+):
+    return {
+        "profiles": network_manager.list_profiles(),
+    }
+
+
+@app.post("/api/network/profiles")
+async def create_network_profile(
+    request: NetworkProfileRequest,
+    _: str = Depends(_require_session),
+):
+    profile = NetworkProfile(
+        name=request.name,
+        mode=request.mode,
+        proxy_server=request.proxy_server,
+        username=request.username,
+        password=request.password,
+        bypass=request.bypass,
+    )
+
+    network_manager.save_profile(profile)
+
+    return {
+        "success": True,
+        "profile": {
+            "name": profile.name,
+            "mode": profile.mode,
+            "proxy_server": profile.proxy_server,
+        },
+    }
+
+
+@app.post("/api/network/test")
+async def test_network_profile(
+    request: NetworkTestRequest,
+    _: str = Depends(_require_session),
+):
+    result = await network_manager.test_connectivity(
+        request.name
+    )
+
+    return {
+        "success": True,
+        "result": result,
+    }
+
+
+# ================================================================
+# секретات
+# ================================================================
+
+@app.post("/api/secrets/unlock")
+async def unlock_secrets(
+    request: SecretPanelRequest,
+    _: str = Depends(_require_session),
+):
+    if not _verify_admin_password(
+        request.password
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="كلمة المرور غير صحيحة.",
+        )
+
+    return {
+        "success": True,
+        "message": "تم فتح لوحة الأسرار.",
     }
 
 
@@ -1160,30 +969,9 @@ async def analyze_code(
 @app.post("/api/uploads")
 async def upload_file(
     file: UploadFile = File(...),
-    project_id: Optional[int] = None,
     _: str = Depends(_require_session),
 ):
-
-    filename = Path(
-        file.filename or "uploaded_file"
-    ).name
-
-    if not filename:
-        raise HTTPException(
-            status_code=400,
-            detail="اسم الملف غير صالح.",
-        )
-
-    if project_id is not None:
-        _require_project(project_id)
-
-    try:
-        content = await file.read()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"تعذر قراءة الملف: {exc}",
-        ) from exc
+    content = await file.read()
 
     if len(content) > settings.max_upload_size:
         raise HTTPException(
@@ -1191,35 +979,22 @@ async def upload_file(
             detail="حجم الملف أكبر من الحد المسموح.",
         )
 
-    upload_dir = settings.upload_directory
+    filename = file.filename or "upload.bin"
 
-    target = upload_dir / filename
+    path = settings.upload_dir / filename
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    # منع الكتابة خارج مجلد uploads.
-    target = target.resolve()
+    path.write_bytes(content)
 
-    if upload_dir.resolve() not in target.parents:
-        raise HTTPException(
-            status_code=400,
-            detail="مسار الملف غير صالح.",
-        )
-
-    target.write_bytes(content)
-
-    try:
-        record = db.create_uploaded_file(
-            project_id=project_id,
-            filename=filename,
-            path=str(target),
-            size=len(content),
-        )
-    except Exception:
-        record = {
-            "filename": filename,
-            "path": str(target),
-            "size": len(content),
-            "project_id": project_id,
-        }
+    record = db.save_uploaded_file(
+        filename=filename,
+        path=str(path),
+        size=len(content),
+        content_type=file.content_type or "application/octet-stream",
+    )
 
     return {
         "success": True,
@@ -1228,111 +1003,20 @@ async def upload_file(
 
 
 # ================================================================
-# الأسرار
+# معلومات النظام
 # ================================================================
 
-@app.post("/api/secrets/unlock")
-async def unlock_secrets(
-    request: SecretPanelRequest,
-    _: str = Depends(_require_session),
-):
-    if not settings.api_panel_password:
-        raise HTTPException(
-            status_code=503,
-            detail="لوحة الأسرار غير مهيأة بعد.",
-        )
-
-    valid = security.secure_compare(
-        request.password,
-        settings.api_panel_password,
-    )
-
-    if not valid:
-        raise HTTPException(
-            status_code=401,
-            detail="كلمة مرور لوحة الأسرار غير صحيحة.",
-        )
-
-    return {
-        "success": True,
-        "message": "تم فتح لوحة الأسرار.",
-    }
-
-
-# ================================================================
-# إعدادات النظام العامة
-# ================================================================
-
-@app.get("/api/settings")
-async def get_settings(
+@app.get("/api/system/status")
+async def system_status(
     _: str = Depends(_require_session),
 ):
     return {
-        "app_name": settings.app_name,
-        "app_env": settings.app_env,
+        "app": settings.app_name,
+        "environment": settings.app_env,
         "debug": settings.debug,
-        "browser_headless": settings.browser_headless,
-        "browser_timeout": settings.browser_timeout,
-        "connectivity_interval": settings.connectivity_interval,
-        "timezone": settings.timezone,
-        "openai_configured": bool(
-            settings.openai_api_key
-        ),
-        "telegram_configured": bool(
-            settings.telegram_bot_token
-            and settings.telegram_chat_id
-        ),
-        "whatsapp_configured": bool(
-            settings.whatsapp_api_url
-            and settings.whatsapp_access_token
-        ),
+        "online": connectivity.is_online,
+        "browser_initialized": browser._playwright is not None,
+        "projects": len(db.list_projects()),
+        "work_cards": len(db.list_all_work_cards()),
+        "pending_approvals": len(approval_manager.list_pending()),
     }
-
-
-# ================================================================
-# الأحداث الخاصة بالجلسات
-# ================================================================
-
-@app.get("/api/browser/sessions")
-async def browser_sessions(
-    _: str = Depends(_require_session),
-):
-    try:
-        sessions = db.list_browser_sessions()
-    except Exception:
-        sessions = []
-
-    return {
-        "sessions": sessions,
-    }
-
-
-# ================================================================
-# خطأ عام JSON
-# ================================================================
-
-@app.exception_handler(Exception)
-async def global_exception_handler(
-    request: Request,
-    exc: Exception,
-):
-    # لا نكشف تفاصيل داخلية للمستخدم النهائي.
-    try:
-        db.create_event(
-            event_type="application_error",
-            message=str(exc),
-            metadata={
-                "path": request.url.path,
-                "method": request.method,
-            },
-        )
-    except Exception:
-        pass
-
-    return JSONResponse(
-        status_code=500,
-        content={
-            "success": False,
-            "detail": "حدث خطأ داخلي في النظام.",
-        },
-)
