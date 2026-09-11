@@ -1,0 +1,58 @@
+name: Integrate persistent auth sessions
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    if: github.actor == 'ALNAHMI711'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch main auth integration
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('app/main.py')
+          s = p.read_text(encoding='utf-8')
+          old_import = 'from app.agent import Agent\n'
+          new_import = old_import + 'from app.auth_compat import PersistentSessionSet\n'
+          if 'from app.auth_compat import PersistentSessionSet' not in s:
+              if old_import not in s:
+                  raise SystemExit('expected import anchor not found')
+              s = s.replace(old_import, new_import, 1)
+          old_sessions = '_active_sessions: set[str] = set()'
+          if old_sessions in s:
+              s = s.replace(old_sessions, '_active_sessions = PersistentSessionSet()', 1)
+          elif '_active_sessions = PersistentSessionSet()' not in s:
+              raise SystemExit('expected session declaration not found')
+          old_lifespan = '    db.initialize()\n'
+          new_lifespan = '    db.initialize()\n\n    try:\n        _active_sessions.purge()\n    except Exception:\n        pass\n'
+          if '_active_sessions.purge()' not in s:
+              if old_lifespan not in s:
+                  raise SystemExit('expected lifespan anchor not found')
+              s = s.replace(old_lifespan, new_lifespan, 1)
+          p.write_text(s, encoding='utf-8')
+          PY
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest
+      - name: Validate
+        run: |
+          python -m compileall -q app
+          pytest -q
+      - name: Commit integration and remove one-shot workflow
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/main.py
+          git rm .github/workflows/integrate-persistent-auth.yml
+          git diff --cached --quiet && exit 0
+          git commit -m 'feat: use persistent auth sessions in main app'
+          git push
