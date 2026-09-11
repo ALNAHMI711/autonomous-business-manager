@@ -65,6 +65,8 @@ class PersistentTaskQueue:
                     payload=excluded.payload,
                     status=CASE WHEN task_queue.status IN ('completed','cancelled') THEN task_queue.status ELSE 'queued' END,
                     available_at=excluded.available_at,
+                    claimed_at=NULL,
+                    completed_at=NULL,
                     error_message='',
                     updated_at=excluded.updated_at
             """, (task_id, encoded, ready_at, now, now))
@@ -79,7 +81,7 @@ class PersistentTaskQueue:
             if row is None:
                 connection.commit()
                 return None
-            updated = connection.execute("UPDATE task_queue SET status='running', attempts=attempts+1, claimed_at=?, updated_at=? WHERE id=? AND status='queued'", (current, current, row['id']))
+            updated = connection.execute("UPDATE task_queue SET status='running', attempts=attempts+1, claimed_at=?, completed_at=NULL, updated_at=? WHERE id=? AND status='queued'", (current, current, row['id']))
             if updated.rowcount != 1:
                 connection.rollback()
                 return None
@@ -105,7 +107,7 @@ class PersistentTaskQueue:
                     stale_ids.append(row['id'])
             if stale_ids:
                 placeholders = ','.join('?' for _ in stale_ids)
-                connection.execute(f"UPDATE task_queue SET status='queued', available_at=?, claimed_at=NULL, error_message='recovered_after_restart', updated_at=? WHERE id IN ({placeholders}) AND status='running'", (now, now, *stale_ids))
+                connection.execute(f"UPDATE task_queue SET status='queued', available_at=?, claimed_at=NULL, completed_at=NULL, error_message='recovered_after_restart', updated_at=? WHERE id IN ({placeholders}) AND status='running'", (now, now, *stale_ids))
         return len(stale_ids)
 
     def complete(self, task_id: int) -> Optional[dict[str, Any]]:
@@ -115,10 +117,23 @@ class PersistentTaskQueue:
         if retry_at:
             now = self._now()
             with self._connect() as connection:
-                connection.execute("UPDATE task_queue SET status='queued', available_at=?, error_message=?, updated_at=? WHERE task_id=? AND status='running'", (retry_at, error_message[:2000], now, task_id))
+                connection.execute("UPDATE task_queue SET status='queued', available_at=?, claimed_at=NULL, completed_at=NULL, error_message=?, updated_at=? WHERE task_id=? AND status='running'", (retry_at, error_message[:2000], now, task_id))
                 row = connection.execute("SELECT * FROM task_queue WHERE task_id=?", (task_id,)).fetchone()
             return self._row(row)
         return self._transition(task_id, 'failed', error_message[:2000])
+
+    def requeue(self, task_id: int, reason: str = "requeued", delay_seconds: int = 0) -> Optional[dict[str, Any]]:
+        """Return a running item to the durable queue without marking it failed."""
+        if delay_seconds < 0:
+            raise ValueError("delay_seconds must be non-negative")
+        now_dt = datetime.now(timezone.utc)
+        available_at = (now_dt.timestamp() + delay_seconds)
+        ready_at = datetime.fromtimestamp(available_at, tz=timezone.utc).isoformat()
+        now = now_dt.isoformat()
+        with self._connect() as connection:
+            connection.execute("UPDATE task_queue SET status='queued', available_at=?, claimed_at=NULL, completed_at=NULL, error_message=?, updated_at=? WHERE task_id=? AND status='running'", (ready_at, reason[:2000], now, task_id))
+            row = connection.execute("SELECT * FROM task_queue WHERE task_id=?", (task_id,)).fetchone()
+        return self._row(row) if row else None
 
     def cancel(self, task_id: int) -> Optional[dict[str, Any]]:
         return self._transition(task_id, 'cancelled', '')
@@ -132,7 +147,7 @@ class PersistentTaskQueue:
         now = self._now()
         completed_at = now if status in {'completed','cancelled','failed'} else None
         with self._connect() as connection:
-            connection.execute("UPDATE task_queue SET status=?, error_message=?, completed_at=?, updated_at=? WHERE task_id=? AND status='running'", (status, error_message, completed_at, now, task_id))
+            connection.execute("UPDATE task_queue SET status=?, error_message=?, completed_at=?, claimed_at=NULL, updated_at=? WHERE task_id=? AND status='running'", (status, error_message, completed_at, now, task_id))
             row = connection.execute("SELECT * FROM task_queue WHERE task_id=?", (task_id,)).fetchone()
         return self._row(row) if row else None
 
