@@ -12,12 +12,17 @@ logger = logging.getLogger(__name__)
 class PersistentQueueWorker:
     """Durable dispatcher; TaskManager remains the execution boundary."""
 
-    TERMINAL = {"completed", "error", "stopped"}
-
-    def __init__(self, queue: PersistentTaskQueue, task_manager: Any, poll_interval: float = 1.0) -> None:
+    def __init__(
+        self,
+        queue: PersistentTaskQueue,
+        task_manager: Any,
+        poll_interval: float = 1.0,
+        execution_timeout: float = 3600.0,
+    ) -> None:
         self.queue = queue
         self.task_manager = task_manager
         self.poll_interval = max(0.1, poll_interval)
+        self.execution_timeout = max(1.0, execution_timeout)
         self._task: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
 
@@ -50,36 +55,48 @@ class PersistentQueueWorker:
                 self.queue.fail(task_id, "TaskManager rejected execution")
                 return claimed
 
-            # Lightweight test doubles may not expose the durable DB.
-            # The real TaskManager does, so production waits for the actual
-            # work-card terminal state before acknowledging the queue item.
             database = getattr(self.task_manager, "db", None)
             if database is None:
                 self.queue.complete(task_id)
                 return claimed
 
-            while not self._stop.is_set():
-                card = database.get_work_card(task_id)
-                status = str(card.get("status", "")) if card else "error"
-                if status == "completed":
-                    self.queue.complete(task_id)
-                    break
-                if status in {"error", "stopped"}:
-                    message = str(card.get("error_message", "execution_failed")) if card else "task_missing"
-                    self.queue.fail(task_id, message)
-                    break
-                if status == "paused":
-                    # A paused card must not be auto-resumed by the worker.
-                    self.queue.cancel(task_id)
-                    break
-                await asyncio.sleep(0.1)
+            await asyncio.wait_for(
+                self._wait_for_terminal(database, task_id),
+                timeout=self.execution_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.error("Persistent task %s exceeded execution timeout", task_id)
+            self.queue.fail(task_id, "execution_timeout")
         except asyncio.CancelledError:
-            self.queue.fail(task_id, "worker cancelled")
+            # Worker shutdown must not lose an in-flight claim. The queue
+            # remains durable and will be picked up again after restart.
+            self.queue.requeue(task_id, "worker_cancelled", delay_seconds=1)
             raise
         except Exception as exc:
             logger.exception("Persistent task %s failed", task_id)
             self.queue.fail(task_id, str(exc))
         return claimed
+
+    async def _wait_for_terminal(self, database: Any, task_id: int) -> None:
+        while not self._stop.is_set():
+            card = database.get_work_card(task_id)
+            status = str(card.get("status", "")) if card else "error"
+            if status == "completed":
+                self.queue.complete(task_id)
+                return
+            if status in {"error", "stopped"}:
+                message = str(card.get("error_message", "execution_failed")) if card else "task_missing"
+                self.queue.fail(task_id, message)
+                return
+            if status == "paused":
+                self.queue.requeue(task_id, "task_paused", delay_seconds=5)
+                return
+            await asyncio.sleep(0.1)
+
+        if not self._stop.is_set():
+            self.queue.fail(task_id, "worker_stopped")
+        else:
+            self.queue.requeue(task_id, "worker_stopped", delay_seconds=1)
 
     async def _loop(self) -> None:
         while not self._stop.is_set():
