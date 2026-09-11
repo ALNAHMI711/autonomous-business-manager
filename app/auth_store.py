@@ -3,11 +3,10 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
 
 
 class AuthStore:
-    """Durable hashed session store with expiry and revocation."""
+    """Durable session store; only token hashes are persisted."""
 
     def __init__(self, database_path: str, ttl_seconds: int = 86_400) -> None:
         self.database_path = Path(database_path)
@@ -42,6 +41,8 @@ class AuthStore:
             )
 
     def create(self, token_hash: str) -> str:
+        if not token_hash:
+            raise ValueError("token_hash must not be empty")
         now = self._now()
         expires = now + timedelta(seconds=self.ttl_seconds)
         with self._connect() as connection:
@@ -52,15 +53,27 @@ class AuthStore:
         return expires.isoformat()
 
     def valid(self, token_hash: str) -> bool:
-        now = self._now().isoformat()
+        if not token_hash:
+            return False
+        now = self._now()
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT expires_at, revoked_at FROM auth_sessions WHERE token_hash = ?",
                 (token_hash,),
             ).fetchone()
-        return bool(row and not row["revoked_at"] and row["expires_at"] > now)
+        if not row or row["revoked_at"]:
+            return False
+        try:
+            expires_at = datetime.fromisoformat(row["expires_at"])
+        except (TypeError, ValueError):
+            return False
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        return expires_at > now
 
     def revoke(self, token_hash: str) -> None:
+        if not token_hash:
+            return
         with self._connect() as connection:
             connection.execute(
                 "UPDATE auth_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL",
