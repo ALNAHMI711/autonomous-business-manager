@@ -19,13 +19,18 @@ def make_app(tmp_path):
     second_user = ownership.create_user("user2")
 
     with sqlite3.connect(str(tmp_path / "test.db")) as connection:
+        for name, owner_id in (("owner-one", 1), ("owner-two", second_user)):
+            connection.execute(
+                "INSERT INTO projects(name, description, status, workflow_type, created_at, updated_at, owner_id) VALUES (?, ?, ?, ?, datetime('now'), datetime('now'), ?)",
+                (name, "", "active", "assistant", owner_id),
+            )
         connection.execute(
-            "INSERT INTO projects(name, description, status, workflow_type, created_at, updated_at, owner_id) VALUES (?, ?, ?, ?, datetime('now'), datetime('now'), ?)",
-            ("owner-one", "", "active", "assistant", 1),
+            "INSERT INTO work_cards(title, description, project_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))",
+            ("card-one", "", 1, "draft"),
         )
         connection.execute(
-            "INSERT INTO projects(name, description, status, workflow_type, created_at, updated_at, owner_id) VALUES (?, ?, ?, ?, datetime('now'), datetime('now'), ?)",
-            ("owner-two", "", "active", "assistant", second_user),
+            "INSERT INTO work_cards(title, description, project_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))",
+            ("card-two", "", 2, "draft"),
         )
         connection.commit()
 
@@ -36,6 +41,14 @@ def make_app(tmp_path):
 
     app = FastAPI()
     app.add_middleware(ProjectAccessMiddleware, database=database)
+
+    @app.get("/api/projects")
+    async def projects():
+        return {"projects": database.list_projects()}
+
+    @app.get("/api/work-cards")
+    async def work_cards():
+        return {"work_cards": database.list_all_work_cards()}
 
     @app.get("/api/projects/{project_id}")
     async def project(project_id: int):
@@ -69,6 +82,20 @@ def test_second_user_cannot_access_first_users_project(tmp_path):
     client = TestClient(make_app(tmp_path))
     response = client.get("/api/projects/1", cookies={"session": "user-two-session"})
     assert response.status_code == 404
+
+
+def test_project_listing_is_owner_filtered(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    response = client.get("/api/projects", cookies={"session": "user-one-session"})
+    assert response.status_code == 200
+    assert [project["id"] for project in response.json()["projects"]] == [1]
+
+
+def test_work_card_listing_is_owner_filtered(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    response = client.get("/api/work-cards", cookies={"session": "user-one-session"})
+    assert response.status_code == 200
+    assert [card["project_id"] for card in response.json()["work_cards"]] == [1]
 
 
 def test_project_id_in_json_body_is_owner_checked_and_body_is_replayed(tmp_path):
