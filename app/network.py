@@ -25,13 +25,10 @@ class NetworkProfile:
     def validate(self) -> None:
         if not self.name or len(self.name) > 80:
             raise ValueError("اسم ملف الشبكة غير صالح.")
-
         if self.mode not in {"direct", "proxy"}:
             raise ValueError("وضع الشبكة يجب أن يكون direct أو proxy.")
-
         if self.mode == "direct":
             return
-
         parsed = urlparse(self.proxy_server)
         if parsed.scheme.lower() not in SUPPORTED_SCHEMES:
             raise ValueError("البروكسي يجب أن يستخدم http أو https أو socks5.")
@@ -44,10 +41,7 @@ class NetworkProfile:
         self.validate()
         if self.mode == "direct":
             return None
-
-        result: dict[str, str] = {
-            "server": self.proxy_server,
-        }
+        result: dict[str, str] = {"server": self.proxy_server}
         if self.username:
             result["username"] = self.username
         if self.password:
@@ -69,15 +63,7 @@ class NetworkProfile:
 
 
 class NetworkManager:
-    """إدارة مسارات اتصال آمنة للمشاريع.
-
-    direct: يستخدم مسار الشبكة الطبيعي للنظام (مثل إنترنت الهاتف عند تشغيل
-    التطبيق على Termux).
-    proxy: يوجه جلسة المتصفح عبر HTTP/HTTPS/SOCKS5 proxy محدد.
-
-    هذا لا ينشئ VPN ولا يغير routing في نظام التشغيل؛ الـVPN الحقيقي يجب
-    أن يكون مفعلاً على الجهاز نفسه. التطبيق يستطيع فقط اختيار proxy للمشروع.
-    """
+    """إدارة مسارات اتصال آمنة للمشاريع والمتصفح."""
 
     def __init__(self, database, security) -> None:
         self.db = database
@@ -93,34 +79,21 @@ class NetworkManager:
 
     def save_profile(self, profile: NetworkProfile) -> dict[str, Any]:
         profile.validate()
-        payload = json.dumps(
-            {
-                "name": profile.name,
-                "mode": profile.mode,
-                "proxy_server": profile.proxy_server,
-                "username": profile.username,
-                "password": profile.password,
-                "bypass": profile.bypass,
-            },
-            ensure_ascii=False,
-        )
+        payload = json.dumps({
+            "name": profile.name,
+            "mode": profile.mode,
+            "proxy_server": profile.proxy_server,
+            "username": profile.username,
+            "password": profile.password,
+            "bypass": profile.bypass,
+        }, ensure_ascii=False)
         encrypted = self.security.encrypt(payload)
         secret_name = self._profile_secret_name(profile.name)
         existing = self.db.get_secret_by_name(secret_name)
-
         if existing:
-            record = self.db.update_secret(
-                existing["id"],
-                encrypted_value=encrypted,
-                description="ملف اتصال شبكة للمشاريع والمتصفح",
-            )
+            record = self.db.update_secret(existing["id"], encrypted_value=encrypted, description="ملف اتصال شبكة للمشاريع والمتصفح")
         else:
-            record = self.db.create_secret(
-                name=secret_name,
-                encrypted_value=encrypted,
-                description="ملف اتصال شبكة للمشاريع والمتصفح",
-            )
-
+            record = self.db.create_secret(name=secret_name, encrypted_value=encrypted, description="ملف اتصال شبكة للمشاريع والمتصفح")
         return profile.masked() | {"id": record.get("id") if record else None}
 
     def list_profiles(self) -> list[dict[str, Any]]:
@@ -135,14 +108,7 @@ class NetworkManager:
                 if profile:
                     result.append(profile.masked())
             except Exception:
-                result.append({
-                    "name": profile_name,
-                    "mode": "invalid",
-                    "proxy_server": "",
-                    "username": "",
-                    "has_password": False,
-                    "bypass": "",
-                })
+                result.append({"name": profile_name, "mode": "invalid", "proxy_server": "", "username": "", "has_password": False, "bypass": ""})
         return result
 
     def get_profile(self, name: str) -> Optional[NetworkProfile]:
@@ -175,19 +141,13 @@ class NetworkManager:
             if existing:
                 self.db.delete_secret(existing["id"])
             return
-
         if not self.get_profile(profile_name):
             raise ValueError("ملف الشبكة المطلوب غير موجود.")
-
         encrypted = self.security.encrypt(profile_name)
         if existing:
             self.db.update_secret(existing["id"], encrypted_value=encrypted)
         else:
-            self.db.create_secret(
-                name=secret_name,
-                encrypted_value=encrypted,
-                description="ربط ملف شبكة بالمشروع",
-            )
+            self.db.create_secret(name=secret_name, encrypted_value=encrypted, description="ربط ملف شبكة بالمشروع")
 
     def get_project_profile(self, project_id: int) -> Optional[NetworkProfile]:
         record = self.db.get_secret_by_name(self._binding_secret_name(project_id))
@@ -200,30 +160,21 @@ class NetworkManager:
         profile = self.get_profile(profile_name)
         if not profile:
             raise ValueError("ملف الشبكة غير موجود.")
-
         proxy = profile.to_playwright_proxy()
         proxy_url = None
         if proxy:
             proxy_url = proxy["server"]
             if proxy.get("username"):
                 parsed = urlparse(proxy_url)
-                proxy_url = f"{parsed.scheme}://{proxy['username']}:{proxy.get('password', '')}@{parsed.hostname}:{parsed.port}"
-
-        async with httpx.AsyncClient(
-            timeout=15.0,
-            follow_redirects=True,
-            proxy=proxy_url,
-        ) as client:
-            response = await client.get(
-                "https://api.ipify.org?format=json",
-                headers={"User-Agent": "AutonomousBusinessManager/1.0"},
-            )
+                host = parsed.hostname or ""
+                port = f":{parsed.port}" if parsed.port else ""
+                proxy_url = f"{parsed.scheme}://{proxy['username']}:{proxy.get('password', '')}@{host}{port}"
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, proxy=proxy_url) as client:
+            response = await client.get("https://api.ipify.org?format=json", headers={"User-Agent": "AutonomousBusinessManager/1.0"})
             response.raise_for_status()
             data = response.json()
+        return {"success": True, "profile": profile.masked(), "observed_public_ip": str(data.get("ip", "")), "status_code": response.status_code}
 
-        return {
-            "success": True,
-            "profile": profile.masked(),
-            "observed_public_ip": str(data.get("ip", "")),
-            "status_code": response.status_code,
-        }
+    async def test_connectivity(self, profile_name: str) -> dict[str, Any]:
+        """Backward-compatible API used by the existing HTTP route."""
+        return await self.test_profile(profile_name)
