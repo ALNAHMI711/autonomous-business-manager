@@ -13,17 +13,58 @@ from app.persistent_queue import PersistentTaskQueue
 from app.queue_worker import PersistentQueueWorker
 from app.kill_switch import KillSwitch
 from app.security_headers import SecurityHeadersMiddleware
+from app.network_policy import NetworkPolicyManager
+from app.network import NetworkManager
+from app.security import SecurityManager
 
 
 queue = PersistentTaskQueue(settings.database_path)
 kill_switch = KillSwitch(settings.database_path)
+network_manager = NetworkManager(db, SecurityManager())
+network_policy = NetworkPolicyManager(db, SecurityManager(), network_manager)
 _original_run = task_manager.run
 _original_enqueue = task_manager.enqueue
 
 
+async def _verify_network_for_card(work_card_id: int) -> bool:
+    card = db.get_work_card(work_card_id)
+    if not card:
+        return False
+    project_id = card.get("project_id")
+    if project_id is None:
+        return True
+    policy = network_policy.get(int(project_id))
+    if policy is None:
+        return True
+    result = await network_policy.verify_project(int(project_id))
+    if result.get("allowed"):
+        return True
+    if not policy.fail_closed:
+        try:
+            db.create_event(
+                event_type="network_policy_warning",
+                message="فشل تحقق سياسة الشبكة لكن fail_closed غير مفعّل.",
+                project_id=int(project_id),
+                metadata={"work_card_id": work_card_id, "reason": result.get("reason")},
+            )
+        except Exception:
+            pass
+        return True
+    try:
+        db.create_event(
+            event_type="network_execution_blocked",
+            message="تم منع تنفيذ المهمة بسبب فشل سياسة الشبكة.",
+            project_id=int(project_id),
+            metadata={"work_card_id": work_card_id, "reason": result.get("reason")},
+        )
+    except Exception:
+        pass
+    return False
+
+
 async def _queue_run(work_card_id: int) -> bool:
     """Public execution entrypoint: persist first, execute via the worker."""
-    if kill_switch.is_active():
+    if kill_switch.is_active() or not await _verify_network_for_card(work_card_id):
         return False
     card = db.get_work_card(work_card_id)
     if not card:
@@ -35,7 +76,7 @@ async def _queue_run(work_card_id: int) -> bool:
 
 
 async def _queue_enqueue(work_card_id: int) -> bool:
-    if kill_switch.is_active():
+    if kill_switch.is_active() or not await _verify_network_for_card(work_card_id):
         return False
     accepted = await _original_enqueue(work_card_id)
     if not accepted:
@@ -44,7 +85,7 @@ async def _queue_enqueue(work_card_id: int) -> bool:
 
 
 class _ExecutionGate:
-    """Keep the durable worker behind the same fail-safe gate."""
+    """Keep the durable worker behind the same fail-safe gates."""
 
     def __init__(self, manager, gate: KillSwitch) -> None:
         self._manager = manager
@@ -52,7 +93,7 @@ class _ExecutionGate:
         self.db = manager.db
 
     async def run(self, work_card_id: int) -> bool:
-        if self._gate.is_active():
+        if self._gate.is_active() or not await _verify_network_for_card(work_card_id):
             return False
         return bool(await self._manager.run(work_card_id))
 
