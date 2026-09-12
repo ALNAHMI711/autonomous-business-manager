@@ -1,6 +1,6 @@
 import sqlite3
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from app.auth_store import AuthStore
@@ -47,8 +47,12 @@ def make_app(tmp_path):
         return {"projects": database.list_projects()}
 
     @app.get("/api/work-cards")
-    async def work_cards():
-        return {"work_cards": database.list_all_work_cards()}
+    async def work_cards(request: Request):
+        project_id = request.query_params.get("project_id")
+        cards = database.list_all_work_cards()
+        if project_id is not None:
+            cards = [card for card in cards if str(card["project_id"]) == project_id]
+        return {"work_cards": cards}
 
     @app.get("/api/projects/{project_id}")
     async def project(project_id: int):
