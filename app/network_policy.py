@@ -38,6 +38,9 @@ class NetworkPolicyManager:
         self.db = database
         self.security = security
         self.network = network_manager
+        # Public compatibility alias: callers/tests may need to inspect the
+        # exact configured NetworkManager instance used by this policy manager.
+        self.network_manager = network_manager
 
     @staticmethod
     def _secret_name(project_id: int) -> str:
