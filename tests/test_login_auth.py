@@ -57,7 +57,10 @@ def test_named_users_authenticate_to_distinct_user_ids(tmp_path: Path):
 
 
 def test_bootstrap_admin_legacy_login_remains_available(tmp_path: Path):
-    credentials = UserCredentialStore(str(tmp_path / "app.db"))
+    database_path = tmp_path / "app.db"
+    ownership = OwnershipStore(str(database_path))
+    ownership.initialize()
+    credentials = UserCredentialStore(str(database_path))
     sessions = FakeSessions(credentials)
     authenticator = LoginAuthenticator(sessions, FakeSecurity())
 
@@ -69,7 +72,10 @@ def test_bootstrap_admin_legacy_login_remains_available(tmp_path: Path):
 
 
 def test_invalid_named_user_is_rejected(tmp_path: Path):
-    credentials = UserCredentialStore(str(tmp_path / "app.db"))
+    database_path = tmp_path / "app.db"
+    ownership = OwnershipStore(str(database_path))
+    ownership.initialize()
+    credentials = UserCredentialStore(str(database_path))
     sessions = FakeSessions(credentials)
     authenticator = LoginAuthenticator(sessions, FakeSecurity())
 
