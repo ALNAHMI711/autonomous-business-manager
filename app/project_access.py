@@ -142,6 +142,13 @@ class ProjectAccessMiddleware:
                         approval for approval in payload["approvals"]
                         if self._validate_card(approval.get("work_card_id"), user_id)
                     ]
+                elif path == "/api/projects" and isinstance(payload.get("project"), dict):
+                    project = payload["project"]
+                    project_id = project.get("id")
+                    if project_id is None or not self.ownership.assign_project(int(project_id), user_id):
+                        await self._reject(send, 500, "تعذر تثبيت ملكية المشروع.")
+                        return
+                    project["owner_id"] = user_id
                 else:
                     await send(messages[0])
                     for message in messages[1:]:
@@ -204,6 +211,12 @@ class ProjectAccessMiddleware:
 
         if project_id is not None and not self._validate_project(project_id, user_id):
             await self._reject(send, 404, "المشروع غير موجود.")
+            return
+
+        if path == "/api/projects" and method == "POST":
+            proxy = await self._owner_filtered_send(path, user_id, send)
+            await self.app(scope, replay_receive, proxy)
+            await proxy.flush()  # type: ignore[attr-defined]
             return
 
         if method == "GET" and path in self.OWNER_LIST_PATHS and "project_id" not in query:
