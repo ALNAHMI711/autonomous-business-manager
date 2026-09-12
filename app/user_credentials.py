@@ -18,6 +18,7 @@ class UserCredentialStore:
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self.database_path), check_same_thread=False)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA busy_timeout = 5000")
         return connection
@@ -43,7 +44,7 @@ class UserCredentialStore:
             raise ValueError("invalid user_id")
         if not isinstance(password, str) or len(password) < 12:
             raise ValueError("password must contain at least 12 characters")
-        password_hash = self.passwords.hash_password(password)
+        password_hash = self.passwords.hash(password)
         with self._connect() as connection:
             user = connection.execute(
                 "SELECT id FROM users WHERE id = ? AND is_active = 1",
@@ -74,7 +75,7 @@ class UserCredentialStore:
             ).fetchone()
         if row is None:
             return False
-        return self.passwords.verify_password(password, row["password_hash"])
+        return self.passwords.verify(password, row["password_hash"])
 
     def get_user_id_by_username(self, username: str) -> Optional[int]:
         if not isinstance(username, str):
