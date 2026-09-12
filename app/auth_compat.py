@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.auth_store import AuthStore
 from app.config import settings
 from app.security import hash_session_token
+from app.user_credentials import UserCredentialStore
 
 
 class PersistentSessionSet:
@@ -10,6 +11,8 @@ class PersistentSessionSet:
 
     def __init__(self) -> None:
         self._store = AuthStore(settings.database_path)
+        self._credentials = UserCredentialStore(settings.database_path)
+        self._credentials.initialize()
 
     def add(self, token: str, user_id: int = 1) -> None:
         if not token:
@@ -33,3 +36,7 @@ class PersistentSessionSet:
 
     def purge(self) -> None:
         self._store.purge_expired()
+
+    @property
+    def credentials(self) -> UserCredentialStore:
+        return self._credentials
