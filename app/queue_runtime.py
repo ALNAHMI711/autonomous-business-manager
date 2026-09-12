@@ -12,6 +12,7 @@ from app.project_access import ProjectAccessMiddleware
 from app.persistent_queue import PersistentTaskQueue
 from app.queue_worker import PersistentQueueWorker
 from app.kill_switch import KillSwitch
+from app.security_headers import SecurityHeadersMiddleware
 
 
 queue = PersistentTaskQueue(settings.database_path)
@@ -77,9 +78,6 @@ async def _require_control_session(request: Request) -> str:
     token = request.cookies.get("session")
     if not token:
         raise HTTPException(status_code=401, detail="جلسة الدخول غير صالحة أو منتهية.")
-    # PersistentSessionSet is intentionally owned by main.py. This lightweight
-    # route boundary delegates to its existing dependency without importing
-    # private session storage a second time.
     from app.main import _require_session
     return _require_session(request)
 
@@ -156,6 +154,7 @@ async def _lifespan(application):
 
 
 app.add_middleware(ProjectAccessMiddleware, database=db)
+app.add_middleware(SecurityHeadersMiddleware)
 
 if settings.app_env.lower() == "production" and not settings.csrf_secret:
     raise RuntimeError("CSRF_SECRET must be configured in production")
