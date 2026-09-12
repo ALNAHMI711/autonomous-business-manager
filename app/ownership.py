@@ -77,3 +77,29 @@ class OwnershipStore:
                 return False
             cursor = connection.execute("UPDATE projects SET owner_id = ? WHERE id = ?", (owner_id, project_id))
             return cursor.rowcount > 0
+
+    def bind_new_project(self, project_id: int, owner_id: int) -> bool:
+        """Bind a project returned by the create-project route to its session owner.
+
+        The legacy projects schema defaults newly inserted rows to the bootstrap
+        admin (id=1). Only this narrowly-scoped creation path may transfer that
+        default owner; normal assignment remains takeover-safe via assign_project.
+        """
+        if not self.get_user(owner_id):
+            raise ValueError("owner user does not exist")
+        with self._connect() as connection:
+            row = connection.execute("SELECT owner_id FROM projects WHERE id = ?", (project_id,)).fetchone()
+            if row is None:
+                return False
+            current_owner = row["owner_id"]
+            if current_owner is None or int(current_owner) == int(owner_id):
+                return connection.execute(
+                    "UPDATE projects SET owner_id = ? WHERE id = ?",
+                    (owner_id, project_id),
+                ).rowcount > 0
+            if int(current_owner) != self.BOOTSTRAP_USER_ID:
+                return False
+            return connection.execute(
+                "UPDATE projects SET owner_id = ? WHERE id = ? AND owner_id = ?",
+                (owner_id, project_id, self.BOOTSTRAP_USER_ID),
+            ).rowcount > 0
