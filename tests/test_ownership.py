@@ -33,7 +33,12 @@ def test_two_users_cannot_cross_access_projects(tmp_path):
     store = OwnershipStore(str(path))
     store.initialize()
     user2 = store.create_user("user2")
-    store.assign_project(2, user2)
+
+    # initialize() intentionally migrates legacy rows to the bootstrap owner.
+    # Model a second user's already-owned project explicitly instead of using
+    # assign_project(), which must reject ownership takeover.
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE projects SET owner_id = ? WHERE id = 2", (user2,))
 
     assert store.user_can_access_project(1, 1)
     assert not store.user_can_access_project(1, 2)
