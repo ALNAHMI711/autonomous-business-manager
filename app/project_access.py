@@ -6,19 +6,14 @@ from urllib.parse import parse_qs
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from app.auth_store import AuthStore
 from app.database import Database
+from app.ownership import OwnershipStore
+from app.security import hash_session_token
 
 
 class ProjectAccessMiddleware:
-    """Fail closed on project-scoped API requests.
-
-    The current application has one authenticated admin identity, so there is
-    no multi-user owner column yet. This middleware still prevents callers
-    from referencing non-existent projects/cards and validates that every
-    project-scoped identifier resolves to real data before the route runs.
-    The explicit single-admin boundary makes the future owner check a
-    replaceable policy rather than scattering ID validation across routes.
-    """
+    """Fail closed on project-scoped API requests with durable owner checks."""
 
     SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
     PROJECT_PATHS = {
@@ -30,13 +25,27 @@ class ProjectAccessMiddleware:
     def __init__(self, app: ASGIApp, database: Database) -> None:
         self.app = app
         self.database = database
+        self.ownership = OwnershipStore(str(database.database_path))
+        self.auth = AuthStore(str(database.database_path))
+        self.ownership.initialize()
+        self.auth.initialize()
 
     @staticmethod
-    def _session_present(headers: list[tuple[bytes, bytes]]) -> bool:
+    def _session_token(headers: list[tuple[bytes, bytes]]) -> Optional[str]:
         for key, value in headers:
-            if key.lower() == b"cookie" and b"session=" in value:
-                return True
-        return False
+            if key.lower() != b"cookie":
+                continue
+            for part in value.decode("utf-8", "ignore").split(";"):
+                name, separator, token = part.strip().partition("=")
+                if separator and name == "session" and token:
+                    return token
+        return None
+
+    def _user_id(self, headers: list[tuple[bytes, bytes]]) -> Optional[int]:
+        token = self._session_token(headers)
+        if not token:
+            return None
+        return self.auth.user_id(hash_session_token(token))
 
     @staticmethod
     def _path_id(path: str, prefix: str) -> Optional[int]:
@@ -48,23 +57,27 @@ class ProjectAccessMiddleware:
         except (TypeError, ValueError):
             return None
 
-    def _validate_project(self, project_id: Any) -> bool:
+    def _validate_project(self, project_id: Any, user_id: Optional[int]) -> bool:
         try:
             value = int(project_id)
         except (TypeError, ValueError):
             return False
-        return value > 0 and self.database.get_project(value) is not None
+        if value <= 0 or user_id is None:
+            return False
+        return self.ownership.user_can_access_project(user_id, value)
 
-    def _validate_card(self, card_id: Any) -> bool:
+    def _validate_card(self, card_id: Any, user_id: Optional[int]) -> bool:
         try:
             value = int(card_id)
         except (TypeError, ValueError):
+            return False
+        if value <= 0 or user_id is None:
             return False
         card = self.database.get_work_card(value)
         if not card:
             return False
         project_id = card.get("project_id")
-        return project_id is None or self._validate_project(project_id)
+        return project_id is not None and self._validate_project(project_id, user_id)
 
     async def _read_body(self, receive: Receive) -> tuple[bytes, Receive]:
         chunks: list[bytes] = []
@@ -93,15 +106,19 @@ class ProjectAccessMiddleware:
             return
 
         path = scope.get("path", "")
-        if not path.startswith("/api/") or not self._session_present(scope.get("headers", [])):
+        if not path.startswith("/api/"):
+            await self.app(scope, receive, send)
+            return
+
+        headers = scope.get("headers", [])
+        user_id = self._user_id(headers)
+        if user_id is None:
             await self.app(scope, receive, send)
             return
 
         method = scope.get("method", "GET").upper()
         query = parse_qs((scope.get("query_string") or b"").decode("utf-8", "ignore"))
-
         project_id: Any = query.get("project_id", [None])[0]
-        card_id: Any = None
 
         for prefix in self.PROJECT_PATHS:
             if path.startswith(prefix):
@@ -110,7 +127,7 @@ class ProjectAccessMiddleware:
 
         if path.startswith("/api/work-cards/"):
             card_id = self._path_id(path, "/api/work-cards/")
-            if card_id is not None and not self._validate_card(card_id):
+            if card_id is not None and not self._validate_card(card_id, user_id):
                 await self._reject(send, 404, "بطاقة العمل أو مشروعها غير موجود.")
                 return
 
@@ -124,14 +141,9 @@ class ProjectAccessMiddleware:
             except (UnicodeDecodeError, json.JSONDecodeError):
                 payload = {}
 
-        if project_id is not None and not self._validate_project(project_id):
+        if project_id is not None and not self._validate_project(project_id, user_id):
             await self._reject(send, 404, "المشروع غير موجود.")
             return
-
-        if path == "/api/work-cards" and project_id is None:
-            # Single-admin mode: listing all cards is intentional and remains
-            # protected by the normal authenticated-session dependency.
-            pass
 
         await self.app(scope, replay_receive, send)
 
