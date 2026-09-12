@@ -69,5 +69,11 @@ class OwnershipStore:
         if not self.get_user(owner_id):
             raise ValueError("owner user does not exist")
         with self._connect() as connection:
+            row = connection.execute("SELECT owner_id FROM projects WHERE id = ?", (project_id,)).fetchone()
+            if row is None:
+                return False
+            current_owner = row["owner_id"]
+            if current_owner is not None and int(current_owner) != int(owner_id):
+                return False
             cursor = connection.execute("UPDATE projects SET owner_id = ? WHERE id = ?", (owner_id, project_id))
             return cursor.rowcount > 0
