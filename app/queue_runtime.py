@@ -8,15 +8,19 @@ from app.csrf_middleware import CSRFSecurityMiddleware
 from app.project_access import ProjectAccessMiddleware
 from app.persistent_queue import PersistentTaskQueue
 from app.queue_worker import PersistentQueueWorker
+from app.kill_switch import KillSwitch
 
 
 queue = PersistentTaskQueue(settings.database_path)
+kill_switch = KillSwitch(settings.database_path)
 _original_run = task_manager.run
 _original_enqueue = task_manager.enqueue
 
 
 async def _queue_run(work_card_id: int) -> bool:
     """Public execution entrypoint: persist first, execute via the worker."""
+    if kill_switch.is_active():
+        return False
     card = db.get_work_card(work_card_id)
     if not card:
         return False
@@ -27,21 +31,31 @@ async def _queue_run(work_card_id: int) -> bool:
 
 
 async def _queue_enqueue(work_card_id: int) -> bool:
+    if kill_switch.is_active():
+        return False
     accepted = await _original_enqueue(work_card_id)
     if not accepted:
         return False
     return bool(queue.enqueue(work_card_id, {"work_card_id": work_card_id}))
 
 
-# Main application routes and TaskManager resume/online paths call run().
-# Redirect that boundary to the durable queue. The worker uses a separate
-# execution proxy so it still calls the original in-process executor.
+class _ExecutionGate:
+    """Keep the durable worker behind the same fail-safe gate."""
+
+    def __init__(self, manager, gate: KillSwitch) -> None:
+        self._manager = manager
+        self._gate = gate
+        self.db = manager.db
+
+    async def run(self, work_card_id: int) -> bool:
+        if self._gate.is_active():
+            return False
+        return bool(await self._manager.run(work_card_id))
+
+
 task_manager.run = _queue_run  # type: ignore[method-assign]
 task_manager.enqueue = _queue_enqueue  # type: ignore[method-assign]
-execution_manager = SimpleNamespace(
-    run=_original_run,
-    db=db,
-)
+execution_manager = _ExecutionGate(SimpleNamespace(run=_original_run, db=db), kill_switch)
 worker = PersistentQueueWorker(queue, execution_manager)
 
 
@@ -69,14 +83,9 @@ async def _lifespan(application):
             await worker.stop()
 
 
-# Production runs through this module. Project access is installed before
-# CSRF so CSRF remains the outer security boundary while project validation
-# protects every project-scoped API route in one place.
 app.add_middleware(ProjectAccessMiddleware, database=db)
 
 if settings.app_env.lower() == "production" and not settings.csrf_secret:
     raise RuntimeError("CSRF_SECRET must be configured in production")
 if settings.csrf_secret:
     app.add_middleware(CSRFSecurityMiddleware, secret=settings.csrf_secret)
-
-app.router.lifespan_context = _lifespan
