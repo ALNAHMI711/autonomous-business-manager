@@ -14,7 +14,7 @@ from app.queue_worker import PersistentQueueWorker
 from app.kill_switch import KillSwitch
 from app.security_headers import SecurityHeadersMiddleware
 from app.network_policy import NetworkPolicyManager
-from app.security import SecurityManager
+from app.network_policy_api import router as network_policy_router
 
 
 queue = PersistentTaskQueue(settings.database_path)
@@ -39,29 +39,18 @@ async def _verify_network_for_card(work_card_id: int) -> bool:
         return True
     if not policy.fail_closed:
         try:
-            db.create_event(
-                event_type="network_policy_warning",
-                message="فشل تحقق سياسة الشبكة لكن fail_closed غير مفعّل.",
-                project_id=int(project_id),
-                metadata={"work_card_id": work_card_id, "reason": result.get("reason")},
-            )
+            db.create_event(event_type="network_policy_warning", message="فشل تحقق سياسة الشبكة لكن fail_closed غير مفعّل.", project_id=int(project_id), metadata={"work_card_id": work_card_id, "reason": result.get("reason")})
         except Exception:
             pass
         return True
     try:
-        db.create_event(
-            event_type="network_execution_blocked",
-            message="تم منع تنفيذ المهمة بسبب فشل سياسة الشبكة.",
-            project_id=int(project_id),
-            metadata={"work_card_id": work_card_id, "reason": result.get("reason")},
-        )
+        db.create_event(event_type="network_execution_blocked", message="تم منع تنفيذ المهمة بسبب فشل سياسة الشبكة.", project_id=int(project_id), metadata={"work_card_id": work_card_id, "reason": result.get("reason")})
     except Exception:
         pass
     return False
 
 
 async def _queue_run(work_card_id: int) -> bool:
-    """Public execution entrypoint: persist first, execute via the worker."""
     if kill_switch.is_active() or not await _verify_network_for_card(work_card_id):
         return False
     card = db.get_work_card(work_card_id)
@@ -83,8 +72,6 @@ async def _queue_enqueue(work_card_id: int) -> bool:
 
 
 class _ExecutionGate:
-    """Keep the durable worker behind the same fail-safe gates."""
-
     def __init__(self, manager, gate: KillSwitch) -> None:
         self._manager = manager
         self._gate = gate
@@ -113,7 +100,6 @@ async def _sync_queued_cards() -> None:
 
 
 async def _require_control_session(request: Request) -> str:
-    """Reuse the application's authenticated admin session boundary."""
     token = request.cookies.get("session")
     if not token:
         raise HTTPException(status_code=401, detail="جلسة الدخول غير صالحة أو منتهية.")
@@ -134,7 +120,6 @@ async def engage_kill_switch(request: Request) -> JSONResponse:
     except Exception:
         payload = {}
     reason = str(payload.get("reason", "manual_kill_switch"))[:500]
-
     state = kill_switch.engage(reason)
     stopped = 0
     for card in db.list_all_work_cards():
@@ -144,16 +129,10 @@ async def engage_kill_switch(request: Request) -> JSONResponse:
                     stopped += 1
             except Exception:
                 continue
-
     try:
-        db.create_event(
-            event_type="kill_switch_engaged",
-            message=f"تم تفعيل مفتاح الإيقاف: {reason}",
-            metadata={"reason": reason, "stopped_tasks": stopped},
-        )
+        db.create_event(event_type="kill_switch_engaged", message=f"تم تفعيل مفتاح الإيقاف: {reason}", metadata={"reason": reason, "stopped_tasks": stopped})
     except Exception:
         pass
-
     return JSONResponse({"ok": True, **state, "stopped_tasks": stopped})
 
 
@@ -166,13 +145,9 @@ async def release_kill_switch(request: Request) -> JSONResponse:
         payload = {}
     if payload.get("confirm") is not True:
         raise HTTPException(status_code=400, detail="يجب تأكيد إعادة تشغيل الأتمتة.")
-
     state = kill_switch.release()
     try:
-        db.create_event(
-            event_type="kill_switch_released",
-            message="تم إلغاء مفتاح الإيقاف وإعادة السماح بالتنفيذ.",
-        )
+        db.create_event(event_type="kill_switch_released", message="تم إلغاء مفتاح الإيقاف وإعادة السماح بالتنفيذ.")
     except Exception:
         pass
     return JSONResponse({"ok": True, **state})
@@ -193,6 +168,7 @@ async def _lifespan(application):
 
 
 app.router.lifespan_context = _lifespan
+app.include_router(network_policy_router)
 app.add_middleware(ProjectAccessMiddleware, database=db)
 app.add_middleware(SecurityHeadersMiddleware)
 
