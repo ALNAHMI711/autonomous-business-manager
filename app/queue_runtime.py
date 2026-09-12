@@ -169,10 +169,13 @@ async def _lifespan(application):
 
 app.router.lifespan_context = _lifespan
 app.include_router(network_policy_router)
-app.add_middleware(ProjectAccessMiddleware, database=db)
-app.add_middleware(SecurityHeadersMiddleware)
 
-if settings.app_env.lower() == "production" and not settings.csrf_secret:
-    raise RuntimeError("CSRF_SECRET must be configured in production")
-if settings.csrf_secret:
-    app.add_middleware(CSRFSecurityMiddleware, secret=settings.csrf_secret)
+# Middleware is configured during normal process startup. Guarding registration
+# makes repeated imports in test processes safe after Starlette has built its stack.
+if app.middleware_stack is None:
+    app.add_middleware(ProjectAccessMiddleware, database=db)
+    app.add_middleware(SecurityHeadersMiddleware)
+    if settings.app_env.lower() == "production" and not settings.csrf_secret:
+        raise RuntimeError("CSRF_SECRET must be configured in production")
+    if settings.csrf_secret:
+        app.add_middleware(CSRFSecurityMiddleware, secret=settings.csrf_secret)
