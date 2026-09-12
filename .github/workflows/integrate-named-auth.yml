@@ -83,3 +83,5 @@ jobs:
           git diff --cached --quiet && exit 0
           git commit -m "security: integrate named-user authentication"
           git push
+
+      # One-shot integration: this workflow only watches its own file.
