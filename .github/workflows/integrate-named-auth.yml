@@ -1,0 +1,85 @@
+name: Integrate named-user authentication
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/integrate-named-auth.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Patch authentication integration
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("app/main.py")
+          text = path.read_text(encoding="utf-8")
+
+          if "from app.login_auth import LoginAuthenticator" not in text:
+              text = text.replace(
+                  "from app.rate_limit import LoginRateLimiter\n",
+                  "from app.rate_limit import LoginRateLimiter\nfrom app.login_auth import LoginAuthenticator\nfrom app.ownership import OwnershipStore\n",
+                  1,
+              )
+
+          text = text.replace(
+              "class LoginRequest(BaseModel):\n    password: str = Field(min_length=1)\n",
+              "class LoginRequest(BaseModel):\n    username: str = Field(default=\"admin\", min_length=1, max_length=120)\n    password: str = Field(min_length=1)\n\n\nclass UserCreateRequest(BaseModel):\n    username: str = Field(min_length=1, max_length=120)\n    password: str = Field(min_length=12, max_length=500)\n",
+              1,
+          )
+
+          text = text.replace(
+              "_login_rate_limiter = LoginRateLimiter(\n    settings.database_path,\n    max_failures=5,\n    window_seconds=300,\n)\n",
+              "_login_rate_limiter = LoginRateLimiter(\n    settings.database_path,\n    max_failures=5,\n    window_seconds=300,\n)\n_login_authenticator = LoginAuthenticator(\n    sessions=_active_sessions,\n    security=security,\n)\n",
+              1,
+          )
+
+          old = '''    if not _verify_admin_password(\n        request.password\n    ):\n        _, remaining = _login_rate_limiter.record_failure(client_key)\n'''
+          new = '''    authenticated_user = _login_authenticator.authenticate(\n        request.username,\n        request.password,\n    )\n\n    if authenticated_user is None:\n        _, remaining = _login_rate_limiter.record_failure(client_key)\n'''
+          if old not in text:
+              raise SystemExit("login failure block marker not found")
+          text = text.replace(old, new, 1)
+
+          old = '''    _login_rate_limiter.record_success(client_key)\n\n    token = security.generate_session_token()\n\n    _active_sessions.add(token)\n'''
+          new = '''    _login_rate_limiter.record_success(client_key)\n\n    token = _login_authenticator.issue_session(authenticated_user)\n'''
+          if old not in text:
+              raise SystemExit("session issue marker not found")
+          text = text.replace(old, new, 1)
+
+          old = '''    try:\n        db.create_event(\n            event_type="info",\n            message="تم تسجيل دخول جديد إلى لوحة التحكم.",\n        )\n'''
+          new = '''    try:\n        db.create_event(\n            event_type="info",\n            message="تم تسجيل دخول جديد إلى لوحة التحكم.",\n            metadata={\n                "user_id": authenticated_user.user_id,\n                "username": authenticated_user.username,\n            },\n        )\n'''
+          if old not in text:
+              raise SystemExit("login audit marker not found")
+          text = text.replace(old, new, 1)
+
+          marker = '''@app.post("/api/logout")\nasync def logout(\n'''
+          endpoint = '''@app.post("/api/admin/users")\nasync def create_admin_user(\n    request: UserCreateRequest,\n    session: str = Depends(_require_session),\n):\n    if _active_sessions.user_id(session) != 1:\n        raise HTTPException(status_code=403, detail="غير مصرح.")\n\n    ownership = OwnershipStore(settings.database_path)\n    ownership.initialize()\n\n    try:\n        user_id = ownership.create_user(request.username)\n    except Exception:\n        raise HTTPException(status_code=409, detail="اسم المستخدم موجود أو غير صالح.")\n\n    try:\n        _active_sessions.credentials.set_password(user_id, request.password)\n    except Exception:\n        raise HTTPException(status_code=400, detail="تعذر إنشاء كلمة المرور.")\n\n    try:\n        db.create_event(\n            event_type="security_user_created",\n            message="تم إنشاء مستخدم جديد.",\n            metadata={"user_id": user_id, "username": request.username.strip()},\n        )\n    except Exception:\n        pass\n\n    return {\n        "success": True,\n        "user": {"id": user_id, "username": request.username.strip()},\n    }\n\n\n'''
+          if marker not in text:
+              raise SystemExit("logout marker not found")
+          if "/api/admin/users" not in text:
+              text = text.replace(marker, endpoint + marker, 1)
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Validate source
+        run: python -m compileall -q app tests
+
+      - name: Commit integration
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/main.py
+          git diff --cached --quiet && exit 0
+          git commit -m "security: integrate named-user authentication"
+          git push
