@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     app_env: str = "development"
     debug: bool = False
 
+    # ADMIN_PASSWORD_HASH must contain an Argon2id hash in production.
+    # ADMIN_PASSWORD remains only as a development/migration fallback.
+    admin_password_hash: str = Field(default="", repr=False)
     admin_password: str = Field(default="", repr=False)
     api_panel_password: str = Field(default="", repr=False)
     session_secret: str = Field(default="change-this-session-secret", repr=False)
