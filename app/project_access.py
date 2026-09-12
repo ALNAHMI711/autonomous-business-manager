@@ -21,6 +21,7 @@ class ProjectAccessMiddleware:
         "/api/chat/",
         "/api/browser/close/",
     }
+    OWNER_LIST_PATHS = {"/api/projects", "/api/work-cards"}
 
     def __init__(self, app: ASGIApp, database: Database) -> None:
         self.app = app
@@ -100,6 +101,61 @@ class ProjectAccessMiddleware:
 
         return body, replay
 
+    async def _owner_filtered_send(self, path: str, user_id: int, send: Send) -> Send:
+        messages: list[Message] = []
+
+        async def capture(message: Message) -> None:
+            messages.append(message)
+
+        async def flush() -> None:
+            body = b"".join(
+                message.get("body", b"")
+                for message in messages
+                if message.get("type") == "http.response.body"
+            )
+            status = next(
+                (int(message.get("status", 200)) for message in messages if message.get("type") == "http.response.start"),
+                200,
+            )
+            headers = list(
+                next(
+                    (message.get("headers", []) for message in messages if message.get("type") == "http.response.start"),
+                    [],
+                )
+            )
+            try:
+                payload = json.loads(body.decode("utf-8"))
+                allowed_projects = set(self.ownership.list_project_ids(user_id))
+                if path == "/api/projects" and isinstance(payload.get("projects"), list):
+                    payload["projects"] = [
+                        project for project in payload["projects"]
+                        if int(project.get("id", -1)) in allowed_projects
+                    ]
+                elif path == "/api/work-cards" and isinstance(payload.get("work_cards"), list):
+                    payload["work_cards"] = [
+                        card for card in payload["work_cards"]
+                        if card.get("project_id") is not None
+                        and int(card.get("project_id")) in allowed_projects
+                    ]
+                else:
+                    await send(messages[0])
+                    for message in messages[1:]:
+                        await send(message)
+                    return
+                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                headers = [(k, v) for k, v in headers if k.lower() != b"content-length"]
+                headers.append((b"content-length", str(len(body)).encode("ascii")))
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+                pass
+            await send({"type": "http.response.start", "status": status, "headers": headers})
+            await send({"type": "http.response.body", "body": body})
+
+        async def proxy(message: Message) -> None:
+            await capture(message)
+
+        proxy.flush = flush  # type: ignore[attr-defined]
+        return proxy  # type: ignore[return-value]
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
@@ -143,6 +199,12 @@ class ProjectAccessMiddleware:
 
         if project_id is not None and not self._validate_project(project_id, user_id):
             await self._reject(send, 404, "المشروع غير موجود.")
+            return
+
+        if method == "GET" and path in self.OWNER_LIST_PATHS and "project_id" not in query:
+            proxy = await self._owner_filtered_send(path, user_id, send)
+            await self.app(scope, replay_receive, proxy)
+            await proxy.flush()  # type: ignore[attr-defined]
             return
 
         await self.app(scope, replay_receive, send)
