@@ -8,6 +8,8 @@ from typing import Optional
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from app.passwords import PasswordService
+
 
 class SecurityManager:
     """Security utilities for authentication, sessions, and secret encryption."""
@@ -15,6 +17,7 @@ class SecurityManager:
     def __init__(self, settings) -> None:
         self.settings = settings
         self._fernet = self._build_fernet()
+        self._passwords = PasswordService()
 
     def _build_fernet(self) -> Optional[Fernet]:
         key = getattr(self.settings, "encryption_key", "")
@@ -106,10 +109,12 @@ class SecurityManager:
             return "*" * len(value)
         return f"{value[:visible_start]}{'*' * max(4, len(value) - visible_start - visible_end)}{value[-visible_end:]}"
 
-    @staticmethod
-    def secure_compare(first: str, second: str) -> bool:
+    def secure_compare(self, first: str, second: str) -> bool:
         if not isinstance(first, str) or not isinstance(second, str):
             return False
+        # Backward-compatible login path: accept Argon2id hashes as the stored value.
+        if second.startswith("$argon2"):
+            return self._passwords.verify(first, second)
         return hmac.compare_digest(first.encode("utf-8"), second.encode("utf-8"))
 
     @staticmethod
