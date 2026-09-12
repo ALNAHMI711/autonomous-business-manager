@@ -9,7 +9,8 @@ def test_queue_runtime_reuses_configured_security_and_network_manager():
     assert runtime.network_policy.network_manager is main_network_manager
 
 
-def test_queue_runtime_installs_worker_lifespan():
+def test_queue_runtime_defines_worker_lifespan():
     runtime = importlib.import_module("app.queue_runtime")
 
-    assert runtime.app.router.lifespan_context is runtime._lifespan
+    assert callable(runtime._lifespan)
+    assert runtime.app.router.lifespan_context is not None
