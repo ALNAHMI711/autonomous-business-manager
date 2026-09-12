@@ -6,6 +6,7 @@ pydantic-settings>=2.4,<3.0
 
 httpx[socks]>=0.27,<1.0
 cryptography>=43.0,<47.0
+argon2-cffi>=23.1,<26.0
 
 playwright>=1.45,<2.0
 
