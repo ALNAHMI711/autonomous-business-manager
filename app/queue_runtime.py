@@ -15,11 +15,13 @@ from app.kill_switch import KillSwitch
 from app.security_headers import SecurityHeadersMiddleware
 from app.network_policy import NetworkPolicyManager
 from app.network_policy_api import router as network_policy_router
+from app.ownership import OwnershipStore
 
 
 queue = PersistentTaskQueue(settings.database_path)
 kill_switch = KillSwitch(settings.database_path)
 network_policy = NetworkPolicyManager(db, security, network_manager)
+ownership = OwnershipStore(settings.database_path)
 _original_run = task_manager.run
 _original_enqueue = task_manager.enqueue
 
@@ -159,6 +161,7 @@ _original_lifespan = app.router.lifespan_context
 @asynccontextmanager
 async def _lifespan(application):
     async with _original_lifespan(application):
+        ownership.initialize()
         await _sync_queued_cards()
         await worker.start()
         try:
