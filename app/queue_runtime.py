@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from app.main import app, db, task_manager, settings
 from app.csrf_middleware import CSRFSecurityMiddleware
+from app.project_access import ProjectAccessMiddleware
 from app.persistent_queue import PersistentTaskQueue
 from app.queue_worker import PersistentQueueWorker
 
@@ -68,8 +69,11 @@ async def _lifespan(application):
             await worker.stop()
 
 
-# Production runs through this module, so install CSRF protection here
-# without rewriting the large route module in app.main.
+# Production runs through this module. Project access is installed before
+# CSRF so CSRF remains the outer security boundary while project validation
+# protects every project-scoped API route in one place.
+app.add_middleware(ProjectAccessMiddleware, database=db)
+
 if settings.app_env.lower() == "production" and not settings.csrf_secret:
     raise RuntimeError("CSRF_SECRET must be configured in production")
 if settings.csrf_secret:
