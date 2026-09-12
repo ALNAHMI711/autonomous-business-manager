@@ -22,6 +22,8 @@ from app.notifications import NotificationManager
 from app.network import NetworkManager, NetworkProfile
 from app.security import SecurityManager
 from app.rate_limit import LoginRateLimiter
+from app.login_auth import LoginAuthenticator
+from app.ownership import OwnershipStore
 from app.task_manager import TaskManager
 
 
@@ -82,6 +84,10 @@ _login_rate_limiter = LoginRateLimiter(
     max_failures=5,
     window_seconds=300,
 )
+_login_authenticator = LoginAuthenticator(
+    sessions=_active_sessions,
+    security=security,
+)
 
 
 # ================================================================
@@ -89,7 +95,13 @@ _login_rate_limiter = LoginRateLimiter(
 # ================================================================
 
 class LoginRequest(BaseModel):
+    username: str = Field(default="admin", min_length=1, max_length=120)
     password: str = Field(min_length=1)
+
+
+class UserCreateRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=12, max_length=500)
 
 
 class ChatRequest(BaseModel):
@@ -406,9 +418,12 @@ async def login(
             headers={"Retry-After": str(retry_after)},
         )
 
-    if not _verify_admin_password(
-        request.password
-    ):
+    authenticated_user = _login_authenticator.authenticate(
+        request.username,
+        request.password,
+    )
+
+    if authenticated_user is None:
         _, remaining = _login_rate_limiter.record_failure(client_key)
         try:
             db.create_event(
@@ -434,9 +449,7 @@ async def login(
 
     _login_rate_limiter.record_success(client_key)
 
-    token = security.generate_session_token()
-
-    _active_sessions.add(token)
+    token = _login_authenticator.issue_session(authenticated_user)
 
     response = JSONResponse(
         {
@@ -459,11 +472,51 @@ async def login(
         db.create_event(
             event_type="info",
             message="تم تسجيل دخول جديد إلى لوحة التحكم.",
+            metadata={
+                "user_id": authenticated_user.user_id,
+                "username": authenticated_user.username,
+            },
         )
     except Exception:
         pass
 
     return response
+
+
+@app.post("/api/admin/users")
+async def create_admin_user(
+    request: UserCreateRequest,
+    session: str = Depends(_require_session),
+):
+    if _active_sessions.user_id(session) != 1:
+        raise HTTPException(status_code=403, detail="غير مصرح.")
+
+    ownership = OwnershipStore(settings.database_path)
+    ownership.initialize()
+
+    try:
+        user_id = ownership.create_user(request.username)
+    except Exception:
+        raise HTTPException(status_code=409, detail="اسم المستخدم موجود أو غير صالح.")
+
+    try:
+        _active_sessions.credentials.set_password(user_id, request.password)
+    except Exception:
+        raise HTTPException(status_code=400, detail="تعذر إنشاء كلمة المرور.")
+
+    try:
+        db.create_event(
+            event_type="security_user_created",
+            message="تم إنشاء مستخدم جديد.",
+            metadata={"user_id": user_id, "username": request.username.strip()},
+        )
+    except Exception:
+        pass
+
+    return {
+        "success": True,
+        "user": {"id": user_id, "username": request.username.strip()},
+    }
 
 
 @app.post("/api/logout")
