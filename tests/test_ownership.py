@@ -46,4 +46,9 @@ def test_two_users_cannot_cross_access_projects(tmp_path):
 def test_assign_project_rejects_unknown_owner(tmp_path):
     store = OwnershipStore(str(tmp_path / "app.db"))
     store.initialize()
-    assert store.assign_project(999, 123) is False if False else True
+    try:
+        store.assign_project(999, 123)
+    except ValueError as exc:
+        assert "owner user" in str(exc)
+    else:
+        raise AssertionError("unknown owner must be rejected")
