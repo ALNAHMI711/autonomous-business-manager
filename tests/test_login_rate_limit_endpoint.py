@@ -15,9 +15,14 @@ def _configure_login_test(monkeypatch, tmp_path):
     # Keep this endpoint test isolated from the application's real database.
     main.OwnershipStore(str(db_path)).initialize()
 
-    sessions = main.PersistentSessionSet()
+    sessions = main.PersistentSessionSet(database_path=str(db_path))
     sessions._store.initialize()
     monkeypatch.setattr(main, "_active_sessions", sessions)
+    monkeypatch.setattr(
+        main,
+        "_login_authenticator",
+        main.LoginAuthenticator(sessions=sessions, security=main.security),
+    )
     return main
 
 
