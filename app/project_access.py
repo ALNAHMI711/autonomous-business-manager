@@ -229,7 +229,7 @@ class ProjectAccessMiddleware:
                 elif path == "/api/projects" and isinstance(payload.get("project"), dict):
                     project = payload["project"]
                     project_id = project.get("id")
-                    if project_id is None or not self.ownership.assign_project(int(project_id), user_id):
+                    if project_id is None or not self.ownership.bind_new_project(int(project_id), user_id):
                         await self._reject(send, 500, "تعذر تثبيت ملكية المشروع.")
                         return
                     project["owner_id"] = user_id
@@ -283,10 +283,6 @@ class ProjectAccessMiddleware:
                 await self._reject(send, 404, "بطاقة العمل أو مشروعها غير موجود.")
                 return
 
-        # Uploads are project-scoped. The route itself predates ownership
-        # isolation, so the middleware supplies the missing security boundary,
-        # rewrites the multipart filename to a unique safe storage name, and
-        # records the authenticated project in a context-local value.
         if path == "/api/uploads":
             if method != "POST":
                 await self._reject(send, 405, "طريقة الطلب غير مدعومة.")
