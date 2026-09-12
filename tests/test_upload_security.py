@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 from fastapi import FastAPI, File, UploadFile
@@ -80,7 +81,8 @@ def test_upload_is_project_bound_and_filename_is_unique(tmp_path):
     record = response.json()["file"]
     assert record["project_id"] == 1
     assert record["content_size"] == 5
-    assert record["analysis"]["original_filename"] == "report.txt"
+    metadata = json.loads(record["analysis"])
+    assert metadata["original_filename"] == "report.txt"
     assert record["filename"].endswith("_report.txt")
     assert (upload_dir / record["filename"]).read_bytes() == b"hello"
 
