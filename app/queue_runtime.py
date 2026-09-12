@@ -16,12 +16,15 @@ from app.security_headers import SecurityHeadersMiddleware
 from app.network_policy import NetworkPolicyManager
 from app.network_policy_api import router as network_policy_router
 from app.ownership import OwnershipStore
+from app.auth_store import AuthStore
+from app.security import hash_session_token
 
 
 queue = PersistentTaskQueue(settings.database_path)
 kill_switch = KillSwitch(settings.database_path)
 network_policy = NetworkPolicyManager(db, security, network_manager)
 ownership = OwnershipStore(settings.database_path)
+auth_store = AuthStore(settings.database_path)
 _original_run = task_manager.run
 _original_enqueue = task_manager.enqueue
 
@@ -155,6 +158,23 @@ async def release_kill_switch(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, **state})
 
 
+@app.get("/api/events", dependencies=[Depends(_require_control_session)])
+async def events(request: Request) -> JSONResponse:
+    token = request.cookies.get("session")
+    user_id = auth_store.user_id(hash_session_token(token)) if token else None
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="جلسة الدخول غير صالحة أو منتهية.")
+
+    allowed_projects = set(ownership.list_project_ids(user_id))
+    visible = []
+    for event in db.list_events(limit=200):
+        project_id = event.get("project_id")
+        if project_id is None or int(project_id) in allowed_projects:
+            visible.append(event)
+
+    return JSONResponse(visible)
+
+
 _original_lifespan = app.router.lifespan_context
 
 
@@ -162,6 +182,7 @@ _original_lifespan = app.router.lifespan_context
 async def _lifespan(application):
     async with _original_lifespan(application):
         ownership.initialize()
+        auth_store.initialize()
         await _sync_queued_cards()
         await worker.start()
         try:
