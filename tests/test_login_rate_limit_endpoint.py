@@ -11,6 +11,10 @@ def _configure_login_test(monkeypatch, tmp_path):
     monkeypatch.setattr(main.settings, "database_path", db_path)
     monkeypatch.setattr(main.settings, "admin_password", "correct-password")
 
+    # Named-user authentication now initializes a durable users table.
+    # Keep this endpoint test isolated from the application's real database.
+    main.OwnershipStore(str(db_path)).initialize()
+
     sessions = main.PersistentSessionSet()
     sessions._store.initialize()
     monkeypatch.setattr(main, "_active_sessions", sessions)
