@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from fastapi import Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from app.main import app, db, task_manager, settings
+from app.main import app, db, task_manager, settings, security, network_manager
 from app.csrf_middleware import CSRFSecurityMiddleware
 from app.project_access import ProjectAccessMiddleware
 from app.persistent_queue import PersistentTaskQueue
@@ -14,14 +14,12 @@ from app.queue_worker import PersistentQueueWorker
 from app.kill_switch import KillSwitch
 from app.security_headers import SecurityHeadersMiddleware
 from app.network_policy import NetworkPolicyManager
-from app.network import NetworkManager
 from app.security import SecurityManager
 
 
 queue = PersistentTaskQueue(settings.database_path)
 kill_switch = KillSwitch(settings.database_path)
-network_manager = NetworkManager(db, SecurityManager())
-network_policy = NetworkPolicyManager(db, SecurityManager(), network_manager)
+network_policy = NetworkPolicyManager(db, security, network_manager)
 _original_run = task_manager.run
 _original_enqueue = task_manager.enqueue
 
@@ -194,6 +192,7 @@ async def _lifespan(application):
             await worker.stop()
 
 
+app.router.lifespan_context = _lifespan
 app.add_middleware(ProjectAccessMiddleware, database=db)
 app.add_middleware(SecurityHeadersMiddleware)
 
