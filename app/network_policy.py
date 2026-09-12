@@ -38,8 +38,6 @@ class NetworkPolicyManager:
         self.db = database
         self.security = security
         self.network = network_manager
-        # Public compatibility alias: callers/tests may need to inspect the
-        # exact configured NetworkManager instance used by this policy manager.
         self.network_manager = network_manager
 
     @staticmethod
@@ -74,6 +72,12 @@ class NetworkPolicyManager:
         )
         policy.validate()
         return policy
+
+    def delete(self, project_id: int) -> bool:
+        record = self.db.get_secret_by_name(self._secret_name(project_id))
+        if not record:
+            return False
+        return bool(self.db.delete_secret(record["id"]))
 
     async def verify_project(self, project_id: int) -> dict[str, Any]:
         policy = self.get(project_id)
