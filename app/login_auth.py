@@ -14,7 +14,7 @@ class AuthenticatedUser:
 
 
 class LoginAuthenticator:
-    """Authenticate named users while preserving the legacy bootstrap admin login."""
+    """Authenticate named users with durable Argon2id credentials."""
 
     ADMIN_USER_ID = 1
     ADMIN_USERNAME = "admin"
@@ -35,22 +35,28 @@ class LoginAuthenticator:
         if not username or not password:
             return None
 
-        # The configured bootstrap admin remains available until a durable
-        # per-user credential is provisioned. This avoids locking out an
-        # existing deployment while moving ordinary users to user credentials.
+        user_id = self.credentials.authenticate(username, password)
+        if user_id is not None:
+            return AuthenticatedUser(user_id=user_id, username=username)
+
+        # Migration compatibility for an existing deployment that still has
+        # only the configured bootstrap admin credential.
         if username == self.ADMIN_USERNAME:
-            configured = self.security.settings.admin_password
-            if configured and self.security.secure_compare(password, configured):
+            configured_hash = getattr(self.security.settings, "admin_password_hash", "")
+            if configured_hash and self.security.secure_compare(password, configured_hash):
                 return AuthenticatedUser(
                     user_id=self.ADMIN_USER_ID,
                     username=self.ADMIN_USERNAME,
                 )
 
-        user_id = self.credentials.authenticate(username, password)
-        if user_id is None:
-            return None
+            configured_legacy = getattr(self.security.settings, "admin_password", "")
+            if configured_legacy and self.security.secure_compare(password, configured_legacy):
+                return AuthenticatedUser(
+                    user_id=self.ADMIN_USER_ID,
+                    username=self.ADMIN_USERNAME,
+                )
 
-        return AuthenticatedUser(user_id=user_id, username=username)
+        return None
 
     def issue_session(self, user: AuthenticatedUser) -> str:
         token = self.security.generate_session_token()
