@@ -3,6 +3,9 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
+from fastapi import Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
+
 from app.main import app, db, task_manager, settings
 from app.csrf_middleware import CSRFSecurityMiddleware
 from app.project_access import ProjectAccessMiddleware
@@ -67,6 +70,75 @@ async def _sync_queued_cards() -> None:
         item = queue.get(card_id)
         if item is None or item.get("status") in {"failed", "cancelled"}:
             queue.enqueue(card_id, {"work_card_id": card_id})
+
+
+async def _require_control_session(request: Request) -> str:
+    """Reuse the application's authenticated admin session boundary."""
+    token = request.cookies.get("session")
+    if not token:
+        raise HTTPException(status_code=401, detail="جلسة الدخول غير صالحة أو منتهية.")
+    # PersistentSessionSet is intentionally owned by main.py. This lightweight
+    # route boundary delegates to its existing dependency without importing
+    # private session storage a second time.
+    from app.main import _require_session
+    return _require_session(request)
+
+
+@app.get("/api/control/kill-switch", dependencies=[Depends(_require_control_session)])
+async def kill_switch_status() -> JSONResponse:
+    return JSONResponse({"ok": True, **kill_switch.status()})
+
+
+@app.post("/api/control/kill-switch", dependencies=[Depends(_require_control_session)])
+async def engage_kill_switch(request: Request) -> JSONResponse:
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    reason = str(payload.get("reason", "manual_kill_switch"))[:500]
+
+    state = kill_switch.engage(reason)
+    stopped = 0
+    for card in db.list_all_work_cards():
+        if str(card.get("status", "")).lower() == "running":
+            try:
+                if await task_manager.stop(int(card["id"])):
+                    stopped += 1
+            except Exception:
+                continue
+
+    try:
+        db.create_event(
+            event_type="kill_switch_engaged",
+            message=f"تم تفعيل مفتاح الإيقاف: {reason}",
+            metadata={"reason": reason, "stopped_tasks": stopped},
+        )
+    except Exception:
+        pass
+
+    return JSONResponse({"ok": True, **state, "stopped_tasks": stopped})
+
+
+@app.post("/api/control/kill-switch/release", dependencies=[Depends(_require_control_session)])
+async def release_kill_switch(request: Request) -> JSONResponse:
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if payload.get("confirm") is not True:
+        raise HTTPException(status_code=400, detail="يجب تأكيد إعادة تشغيل الأتمتة.")
+
+    state = kill_switch.release()
+    try:
+        db.create_event(
+            event_type="kill_switch_released",
+            message="تم إلغاء مفتاح الإيقاف وإعادة السماح بالتنفيذ.",
+        )
+    except Exception:
+        pass
+    return JSONResponse({"ok": True, **state})
 
 
 _original_lifespan = app.router.lifespan_context
