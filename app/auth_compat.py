@@ -9,9 +9,10 @@ from app.user_credentials import UserCredentialStore
 class PersistentSessionSet:
     """Set-compatible adapter backed by AuthStore for restart-safe sessions."""
 
-    def __init__(self) -> None:
-        self._store = AuthStore(settings.database_path)
-        self._credentials = UserCredentialStore(settings.database_path)
+    def __init__(self, database_path: str | None = None) -> None:
+        path = database_path or settings.database_path
+        self._store = AuthStore(path)
+        self._credentials = UserCredentialStore(path)
         self._credentials.initialize()
 
     def add(self, token: str, user_id: int = 1) -> None:
