@@ -1,24 +1,41 @@
+import sqlite3
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.auth_store import AuthStore
+from app.database import Database
+from app.ownership import OwnershipStore
 from app.project_access import ProjectAccessMiddleware
+from app.security import hash_session_token
 
 
-class FakeDatabase:
-    def __init__(self):
-        self.projects = {1: {"id": 1}}
-        self.cards = {7: {"id": 7, "project_id": 1}}
+def make_app(tmp_path):
+    database = Database(str(tmp_path / "test.db"))
+    database.initialize()
 
-    def get_project(self, project_id):
-        return self.projects.get(project_id)
+    ownership = OwnershipStore(str(tmp_path / "test.db"))
+    ownership.initialize()
+    second_user = ownership.create_user("user2")
 
-    def get_work_card(self, card_id):
-        return self.cards.get(card_id)
+    with sqlite3.connect(str(tmp_path / "test.db")) as connection:
+        connection.execute(
+            "INSERT INTO projects(name, description, status, workflow_type, created_at, updated_at, owner_id) VALUES (?, ?, ?, ?, datetime('now'), datetime('now'), ?)",
+            ("owner-one", "", "active", "assistant", 1),
+        )
+        connection.execute(
+            "INSERT INTO projects(name, description, status, workflow_type, created_at, updated_at, owner_id) VALUES (?, ?, ?, ?, datetime('now'), datetime('now'), ?)",
+            ("owner-two", "", "active", "assistant", second_user),
+        )
+        connection.commit()
 
+    auth = AuthStore(str(tmp_path / "test.db"))
+    auth.initialize()
+    auth.create(hash_session_token("user-one-session"), user_id=1)
+    auth.create(hash_session_token("user-two-session"), user_id=second_user)
 
-def make_app():
     app = FastAPI()
-    app.add_middleware(ProjectAccessMiddleware, database=FakeDatabase())
+    app.add_middleware(ProjectAccessMiddleware, database=database)
 
     @app.get("/api/projects/{project_id}")
     async def project(project_id: int):
@@ -35,41 +52,41 @@ def make_app():
     return app
 
 
-def test_invalid_project_path_is_rejected():
-    client = TestClient(make_app())
-    response = client.get("/api/projects/999", cookies={"session": "valid"})
-    assert response.status_code == 404
-
-
-def test_existing_project_path_is_allowed():
-    client = TestClient(make_app())
-    response = client.get("/api/projects/1", cookies={"session": "valid"})
+def test_project_owner_can_access_own_project(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    response = client.get("/api/projects/1", cookies={"session": "user-one-session"})
     assert response.status_code == 200
     assert response.json() == {"project_id": 1}
 
 
-def test_invalid_work_card_is_rejected():
-    client = TestClient(make_app())
-    response = client.get("/api/work-cards/999", cookies={"session": "valid"})
+def test_project_owner_cannot_access_foreign_project(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    response = client.get("/api/projects/2", cookies={"session": "user-one-session"})
     assert response.status_code == 404
 
 
-def test_project_id_in_json_body_is_validated_and_body_is_replayed():
-    client = TestClient(make_app())
+def test_second_user_cannot_access_first_users_project(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    response = client.get("/api/projects/1", cookies={"session": "user-two-session"})
+    assert response.status_code == 404
+
+
+def test_project_id_in_json_body_is_owner_checked_and_body_is_replayed(tmp_path):
+    client = TestClient(make_app(tmp_path))
     response = client.post(
         "/api/chat",
         json={"message": "hello", "project_id": 1},
-        cookies={"session": "valid"},
+        cookies={"session": "user-one-session"},
     )
     assert response.status_code == 200
     assert response.json()["project_id"] == 1
 
 
-def test_invalid_project_id_in_json_body_is_rejected():
-    client = TestClient(make_app())
+def test_foreign_project_id_in_json_body_is_rejected(tmp_path):
+    client = TestClient(make_app(tmp_path))
     response = client.post(
         "/api/chat",
-        json={"message": "hello", "project_id": 999},
-        cookies={"session": "valid"},
+        json={"message": "hello", "project_id": 2},
+        cookies={"session": "user-one-session"},
     )
     assert response.status_code == 404
