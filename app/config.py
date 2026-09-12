@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -54,6 +54,17 @@ class Settings(BaseSettings):
     whatsapp_recipient: Optional[str] = None
 
     timezone: str = "UTC"
+
+    @model_validator(mode="after")
+    def validate_admin_credentials(self):
+        if self.app_env.lower() == "production" and not self.admin_password_hash.strip():
+            raise ValueError("ADMIN_PASSWORD_HASH must be configured in production")
+
+        # Preserve the existing login endpoint while migrating its stored value
+        # from plaintext to the Argon2id hash setting.
+        if self.admin_password_hash.strip():
+            self.admin_password = self.admin_password_hash.strip()
+        return self
 
     @property
     def database_file(self) -> Path:
