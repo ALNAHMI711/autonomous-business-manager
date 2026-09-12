@@ -58,6 +58,10 @@ def make_app(tmp_path):
     async def card(card_id: int):
         return {"card_id": card_id}
 
+    @app.post("/api/work-cards/{card_id}/action")
+    async def card_action(card_id: int, payload: dict):
+        return {"card_id": card_id, **payload}
+
     @app.post("/api/chat")
     async def chat(payload: dict):
         return payload
@@ -96,6 +100,42 @@ def test_work_card_listing_is_owner_filtered(tmp_path):
     response = client.get("/api/work-cards", cookies={"session": "user-one-session"})
     assert response.status_code == 200
     assert [card["project_id"] for card in response.json()["work_cards"]] == [1]
+
+
+def test_work_card_query_project_must_be_owned(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    own = client.get(
+        "/api/work-cards?project_id=1",
+        cookies={"session": "user-one-session"},
+    )
+    foreign = client.get(
+        "/api/work-cards?project_id=2",
+        cookies={"session": "user-one-session"},
+    )
+    assert own.status_code == 200
+    assert [card["id"] for card in own.json()["work_cards"]] == [1]
+    assert foreign.status_code == 404
+
+
+def test_work_card_owner_can_access_action_endpoint(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    response = client.post(
+        "/api/work-cards/1/action",
+        json={"action": "approve"},
+        cookies={"session": "user-one-session"},
+    )
+    assert response.status_code == 200
+    assert response.json()["card_id"] == 1
+
+
+def test_work_card_action_cannot_cross_project_boundary(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    response = client.post(
+        "/api/work-cards/2/action",
+        json={"action": "approve"},
+        cookies={"session": "user-one-session"},
+    )
+    assert response.status_code == 404
 
 
 def test_project_id_in_json_body_is_owner_checked_and_body_is_replayed(tmp_path):
