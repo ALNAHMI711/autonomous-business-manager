@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import contextvars
 import json
+import re
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs
+from uuid import uuid4
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -10,6 +14,50 @@ from app.auth_store import AuthStore
 from app.database import Database
 from app.ownership import OwnershipStore
 from app.security import hash_session_token
+
+
+_current_upload_project_id: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar(
+    "current_upload_project_id",
+    default=None,
+)
+_current_upload_filename: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_upload_filename",
+    default=None,
+)
+
+
+def _save_uploaded_file(
+    database: Database,
+    filename: str,
+    path: str,
+    size: int,
+    content_type: str = "application/octet-stream",
+) -> dict[str, Any]:
+    project_id = _current_upload_project_id.get()
+    original_filename = _current_upload_filename.get() or filename
+    return database.create_uploaded_file(
+        project_id=project_id,
+        filename=filename,
+        path=path,
+        size=size,
+        analysis={
+            "content_type": content_type,
+            "original_filename": original_filename,
+        },
+    )
+
+
+# main.py currently calls save_uploaded_file while Database exposes the
+# newer create_uploaded_file API. Keep a compatibility shim without changing
+# the database schema or replacing the main application module.
+if not hasattr(Database, "save_uploaded_file"):
+    Database.save_uploaded_file = lambda self, filename, path, size=0, content_type="application/octet-stream": _save_uploaded_file(  # type: ignore[attr-defined]
+        self,
+        filename,
+        path,
+        size,
+        content_type,
+    )
 
 
 class ProjectAccessMiddleware:
@@ -100,6 +148,42 @@ class ProjectAccessMiddleware:
             return {"type": "http.request", "body": body, "more_body": False}
 
         return body, replay
+
+    @staticmethod
+    def _upload_filename(body: bytes) -> Optional[str]:
+        match = re.search(rb"filename=(?:\"([^\"]*)\"|([^;\r\n]+))", body, re.IGNORECASE)
+        if not match:
+            return None
+        raw = match.group(1) or match.group(2) or b""
+        return raw.decode("utf-8", "replace")
+
+    @classmethod
+    def _rewrite_upload_body(cls, body: bytes) -> tuple[bytes, str, str]:
+        original = cls._upload_filename(body) or "upload.bin"
+        normalized = original.replace("\\", "/")
+        safe_basename = Path(normalized).name
+        if (
+            not safe_basename
+            or safe_basename in {".", ".."}
+            or safe_basename != normalized
+            or "\x00" in safe_basename
+            or any(ord(char) < 32 for char in safe_basename)
+        ):
+            raise ValueError("اسم الملف غير آمن.")
+
+        safe_basename = safe_basename[:180]
+        storage_name = f"{uuid4().hex}_{safe_basename}"
+        replacement = f'filename="{storage_name}"'.encode("utf-8")
+        rewritten, count = re.subn(
+            rb"filename=(?:\"[^\"]*\"|[^;\r\n]+)",
+            replacement,
+            body,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        if count != 1:
+            raise ValueError("تعذر قراءة اسم الملف.")
+        return rewritten, storage_name, original
 
     async def _owner_filtered_send(self, path: str, user_id: int, send: Send) -> Send:
         messages: list[Message] = []
@@ -198,6 +282,46 @@ class ProjectAccessMiddleware:
             if card_id is not None and not self._validate_card(card_id, user_id):
                 await self._reject(send, 404, "بطاقة العمل أو مشروعها غير موجود.")
                 return
+
+        # Uploads are project-scoped. The route itself predates ownership
+        # isolation, so the middleware supplies the missing security boundary,
+        # rewrites the multipart filename to a unique safe storage name, and
+        # records the authenticated project in a context-local value.
+        if path == "/api/uploads":
+            if method != "POST":
+                await self._reject(send, 405, "طريقة الطلب غير مدعومة.")
+                return
+            if project_id is None or not self._validate_project(project_id, user_id):
+                await self._reject(send, 404, "المشروع غير موجود.")
+                return
+            body, replay_receive = await self._read_body(receive)
+            try:
+                rewritten, storage_name, original_name = self._rewrite_upload_body(body)
+            except ValueError as exc:
+                await self._reject(send, 400, str(exc))
+                return
+            sent = False
+
+            async def upload_replay() -> Message:
+                nonlocal sent
+                if sent:
+                    return {"type": "http.request", "body": b"", "more_body": False}
+                sent = True
+                return {"type": "http.request", "body": rewritten, "more_body": False}
+
+            upload_scope = dict(scope)
+            upload_scope["headers"] = [
+                (key, str(len(rewritten)).encode("ascii")) if key.lower() == b"content-length" else (key, value)
+                for key, value in headers
+            ]
+            project_token = _current_upload_project_id.set(int(project_id))
+            filename_token = _current_upload_filename.set(original_name)
+            try:
+                await self.app(upload_scope, upload_replay, send)
+            finally:
+                _current_upload_filename.reset(filename_token)
+                _current_upload_project_id.reset(project_token)
+            return
 
         body = b""
         replay_receive = receive
