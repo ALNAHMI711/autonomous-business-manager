@@ -11,10 +11,10 @@ class PersistentSessionSet:
     def __init__(self) -> None:
         self._store = AuthStore(settings.database_path)
 
-    def add(self, token: str) -> None:
+    def add(self, token: str, user_id: int = 1) -> None:
         if not token:
             return
-        self._store.create(hash_session_token(token))
+        self._store.create(hash_session_token(token), user_id=user_id)
 
     def discard(self, token: str) -> None:
         if not token:
@@ -25,6 +25,11 @@ class PersistentSessionSet:
         if not isinstance(token, str) or not token:
             return False
         return self._store.valid(hash_session_token(token))
+
+    def user_id(self, token: str) -> int | None:
+        if not token:
+            return None
+        return self._store.user_id(hash_session_token(token))
 
     def purge(self) -> None:
         self._store.purge_expired()
