@@ -21,7 +21,7 @@ class ProjectAccessMiddleware:
         "/api/chat/",
         "/api/browser/close/",
     }
-    OWNER_LIST_PATHS = {"/api/projects", "/api/work-cards"}
+    OWNER_LIST_PATHS = {"/api/projects", "/api/work-cards", "/api/approvals"}
 
     def __init__(self, app: ASGIApp, database: Database) -> None:
         self.app = app
@@ -136,6 +136,11 @@ class ProjectAccessMiddleware:
                         card for card in payload["work_cards"]
                         if card.get("project_id") is not None
                         and int(card.get("project_id")) in allowed_projects
+                    ]
+                elif path == "/api/approvals" and isinstance(payload.get("approvals"), list):
+                    payload["approvals"] = [
+                        approval for approval in payload["approvals"]
+                        if self._validate_card(approval.get("work_card_id"), user_id)
                     ]
                 else:
                     await send(messages[0])
