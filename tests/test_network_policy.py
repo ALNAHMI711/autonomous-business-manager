@@ -30,6 +30,13 @@ class FakeDB:
                 return record
         return None
 
+    def delete_secret(self, secret_id):
+        for name, record in list(self.secrets.items()):
+            if record["id"] == secret_id:
+                del self.secrets[name]
+                return True
+        return False
+
 
 class FakeProfile:
     mode = "proxy"
@@ -125,3 +132,14 @@ async def test_no_policy_preserves_execution():
 def test_policy_rejects_non_https_endpoint():
     with pytest.raises(ValueError):
         NetworkPolicy(1, verify_endpoint="http://example.com").validate()
+
+
+def test_policy_delete_removes_encrypted_secret():
+    db = FakeDB()
+    manager = NetworkPolicyManager(db, FakeSecurity(), FakeNetwork())
+    manager.save(NetworkPolicy(1, expected_country="YE"))
+
+    assert manager.get(1) is not None
+    assert manager.delete(1) is True
+    assert manager.get(1) is None
+    assert manager.delete(1) is False
