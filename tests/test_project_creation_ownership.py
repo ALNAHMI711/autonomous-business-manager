@@ -1,5 +1,3 @@
-import sqlite3
-
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -29,6 +27,10 @@ def make_app(tmp_path):
     async def create_project(payload: dict):
         return {"project": database.create_project(payload["name"])}
 
+    @app.get("/api/projects")
+    async def list_projects():
+        return {"projects": database.list_projects()}
+
     return app, ownership, second_user
 
 
@@ -53,6 +55,7 @@ def test_new_project_cannot_leak_to_other_owner_listing(tmp_path):
         json={"name": "user-two-project"},
         cookies={"session": "user-two-session"},
     )
+    assert response.status_code == 200
     project_id = response.json()["project"]["id"]
     assert ownership.project_owner(project_id) == second_user
 
