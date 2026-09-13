@@ -3,14 +3,16 @@ import sqlite3
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import app.main as main
+import app.network_policy_api as network_policy_api
 from app.auth_store import AuthStore
 from app.database import Database
-from app.network_policy_api import router
+from app.network_policy import NetworkPolicyManager
 from app.ownership import OwnershipStore
 from app.security import hash_session_token
 
 
-def make_app(tmp_path):
+def make_app(tmp_path, monkeypatch):
     database = Database(str(tmp_path / "test.db"))
     database.initialize()
     ownership = OwnershipStore(str(tmp_path / "test.db"))
@@ -33,13 +35,24 @@ def make_app(tmp_path):
     auth.create(hash_session_token("user-one-session"), user_id=1)
     auth.create(hash_session_token("user-two-session"), user_id=second_user)
 
+    # The router module is imported once by the application, so point its
+    # durable dependencies at this isolated test database.
+    monkeypatch.setattr(network_policy_api, "db", database)
+    monkeypatch.setattr(network_policy_api, "ownership", ownership)
+    monkeypatch.setattr(network_policy_api, "auth_store", auth)
+    monkeypatch.setattr(
+        network_policy_api,
+        "manager",
+        NetworkPolicyManager(database, main.security, main.network_manager),
+    )
+
     app = FastAPI()
-    app.include_router(router)
+    app.include_router(network_policy_api.router)
     return app
 
 
-def test_network_policy_foreign_project_is_hidden(tmp_path):
-    client = TestClient(make_app(tmp_path))
+def test_network_policy_foreign_project_is_hidden(tmp_path, monkeypatch):
+    client = TestClient(make_app(tmp_path, monkeypatch))
     response = client.get(
         "/api/network-policy/2",
         cookies={"session": "user-one-session"},
@@ -47,8 +60,8 @@ def test_network_policy_foreign_project_is_hidden(tmp_path):
     assert response.status_code == 404
 
 
-def test_network_policy_owner_can_read_and_write(tmp_path):
-    client = TestClient(make_app(tmp_path))
+def test_network_policy_owner_can_read_and_write(tmp_path, monkeypatch):
+    client = TestClient(make_app(tmp_path, monkeypatch))
     response = client.put(
         "/api/network-policy/1",
         json={"expected_country": "YE", "fail_closed": True},
@@ -64,8 +77,8 @@ def test_network_policy_owner_can_read_and_write(tmp_path):
     assert response.json()["configured"] is True
 
 
-def test_second_user_cannot_modify_first_users_policy(tmp_path):
-    client = TestClient(make_app(tmp_path))
+def test_second_user_cannot_modify_first_users_policy(tmp_path, monkeypatch):
+    client = TestClient(make_app(tmp_path, monkeypatch))
     response = client.put(
         "/api/network-policy/1",
         json={"expected_country": "US", "fail_closed": False},
