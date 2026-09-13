@@ -45,6 +45,11 @@ def make_app(tmp_path, monkeypatch):
         "manager",
         NetworkPolicyManager(database, main.security, main.network_manager),
     )
+    monkeypatch.setattr(
+        network_policy_api,
+        "_require_session",
+        lambda request: request.cookies.get("session") or "",
+    )
 
     app = FastAPI()
     app.include_router(network_policy_api.router)
