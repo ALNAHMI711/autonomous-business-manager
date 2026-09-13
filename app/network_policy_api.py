@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-from typing import Optional
-
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.auth_store import AuthStore
 from app.main import db, security, network_manager, _require_session
 from app.network_policy import NetworkPolicy, NetworkPolicyManager
+from app.security import hash_session_token
+from app.ownership import OwnershipStore
 
 router = APIRouter(prefix="/api/network-policy", tags=["network-policy"])
 manager = NetworkPolicyManager(db, security, network_manager)
+ownership = OwnershipStore(str(db.database_path))
+auth_store = AuthStore(str(db.database_path))
 
 
 class NetworkPolicyRequest(BaseModel):
@@ -25,22 +28,27 @@ async def require_session(request: Request) -> str:
     return _require_session(request)
 
 
-def _project_id(value: int) -> int:
-    if value <= 0 or db.get_project(value) is None:
+async def require_owned_project(project_id: int, request: Request, _: str = Depends(require_session)) -> int:
+    if project_id <= 0 or db.get_project(project_id) is None:
         raise HTTPException(status_code=404, detail="المشروع غير موجود.")
-    return value
+    token = request.cookies.get("session")
+    user_id = auth_store.user_id(hash_session_token(token)) if token else None
+    if user_id is None or not ownership.user_can_access_project(user_id, project_id):
+        raise HTTPException(status_code=404, detail="المشروع غير موجود.")
+    return project_id
 
 
-@router.get("/{project_id}", dependencies=[Depends(require_session)])
-async def get_policy(project_id: int):
-    project_id = _project_id(project_id)
+@router.get("/{project_id}")
+async def get_policy(project_id: int = Depends(require_owned_project)):
     policy = manager.get(project_id)
     return {"configured": policy is not None, "policy": policy.__dict__ if policy else None}
 
 
-@router.put("/{project_id}", dependencies=[Depends(require_session)])
-async def save_policy(project_id: int, payload: NetworkPolicyRequest):
-    project_id = _project_id(project_id)
+@router.put("/{project_id}")
+async def save_policy(
+    payload: NetworkPolicyRequest,
+    project_id: int = Depends(require_owned_project),
+):
     policy = NetworkPolicy(project_id=project_id, **payload.model_dump())
     manager.save(policy)
     db.create_event(
@@ -52,16 +60,14 @@ async def save_policy(project_id: int, payload: NetworkPolicyRequest):
     return {"ok": True, "policy": policy.__dict__}
 
 
-@router.delete("/{project_id}", dependencies=[Depends(require_session)])
-async def delete_policy(project_id: int):
-    project_id = _project_id(project_id)
+@router.delete("/{project_id}")
+async def delete_policy(project_id: int = Depends(require_owned_project)):
     manager.delete(project_id)
     db.create_event(event_type="network_policy_deleted", message="تم حذف سياسة الشبكة للمشروع.", project_id=project_id)
     return {"ok": True}
 
 
-@router.post("/{project_id}/verify", dependencies=[Depends(require_session)])
-async def verify_policy(project_id: int):
-    project_id = _project_id(project_id)
+@router.post("/{project_id}/verify")
+async def verify_policy(project_id: int = Depends(require_owned_project)):
     result = await manager.verify_project(project_id)
     return {"ok": True, **result}
