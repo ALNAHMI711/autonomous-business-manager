@@ -12,6 +12,14 @@ from app.ownership import OwnershipStore
 from app.security import hash_session_token
 
 
+class FakeSecurity:
+    def encrypt(self, value: str) -> str:
+        return value
+
+    def decrypt(self, value: str) -> str:
+        return value
+
+
 def make_app(tmp_path, monkeypatch):
     database = Database(str(tmp_path / "test.db"))
     database.initialize()
@@ -43,7 +51,7 @@ def make_app(tmp_path, monkeypatch):
     monkeypatch.setattr(
         network_policy_api,
         "manager",
-        NetworkPolicyManager(database, main.security, main.network_manager),
+        NetworkPolicyManager(database, FakeSecurity(), main.network_manager),
     )
     monkeypatch.setattr(
         network_policy_api,
