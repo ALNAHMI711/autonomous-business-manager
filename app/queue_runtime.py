@@ -104,20 +104,31 @@ async def _sync_queued_cards() -> None:
             queue.enqueue(card_id, {"work_card_id": card_id})
 
 
-async def _require_control_session(request: Request) -> str:
+async def _require_control_session(request: Request) -> int:
     token = request.cookies.get("session")
     if not token:
         raise HTTPException(status_code=401, detail="جلسة الدخول غير صالحة أو منتهية.")
     from app.main import _require_session
-    return _require_session(request)
+    session_token = _require_session(request)
+    user_id = auth_store.user_id(hash_session_token(session_token))
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="جلسة الدخول غير صالحة أو منتهية.")
+    return int(user_id)
 
 
-@app.get("/api/control/kill-switch", dependencies=[Depends(_require_control_session)])
+async def _require_admin_control(request: Request) -> int:
+    user_id = await _require_control_session(request)
+    if user_id != OwnershipStore.BOOTSTRAP_USER_ID:
+        raise HTTPException(status_code=403, detail="هذه العملية متاحة للمدير فقط.")
+    return user_id
+
+
+@app.get("/api/control/kill-switch", dependencies=[Depends(_require_admin_control)])
 async def kill_switch_status() -> JSONResponse:
     return JSONResponse({"ok": True, **kill_switch.status()})
 
 
-@app.post("/api/control/kill-switch", dependencies=[Depends(_require_control_session)])
+@app.post("/api/control/kill-switch", dependencies=[Depends(_require_admin_control)])
 async def engage_kill_switch(request: Request) -> JSONResponse:
     payload = {}
     try:
@@ -141,7 +152,7 @@ async def engage_kill_switch(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, **state, "stopped_tasks": stopped})
 
 
-@app.post("/api/control/kill-switch/release", dependencies=[Depends(_require_control_session)])
+@app.post("/api/control/kill-switch/release", dependencies=[Depends(_require_admin_control)])
 async def release_kill_switch(request: Request) -> JSONResponse:
     payload = {}
     try:
@@ -160,16 +171,16 @@ async def release_kill_switch(request: Request) -> JSONResponse:
 
 @app.get("/api/events", dependencies=[Depends(_require_control_session)])
 async def events(request: Request) -> JSONResponse:
-    token = request.cookies.get("session")
-    user_id = auth_store.user_id(hash_session_token(token)) if token else None
-    if user_id is None:
-        raise HTTPException(status_code=401, detail="جلسة الدخول غير صالحة أو منتهية.")
-
+    user_id = await _require_control_session(request)
     allowed_projects = set(ownership.list_project_ids(user_id))
     visible = []
     for event in db.list_events(limit=200):
         project_id = event.get("project_id")
-        if project_id is None or int(project_id) in allowed_projects:
+        if project_id is not None:
+            if int(project_id) in allowed_projects:
+                visible.append(event)
+            continue
+        if user_id == OwnershipStore.BOOTSTRAP_USER_ID:
             visible.append(event)
 
     return JSONResponse(visible)
