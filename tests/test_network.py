@@ -23,6 +23,20 @@ def test_http_proxy_profile_is_translated_for_playwright():
     }
 
 
+def test_masked_profile_never_exposes_password():
+    profile = NetworkProfile(
+        name="proxy",
+        mode="proxy",
+        proxy_server="http://127.0.0.1:8080",
+        username="user",
+        password="super-secret",
+    )
+    masked = profile.masked()
+    assert masked["has_password"] is True
+    assert "password" not in masked
+    assert "super-secret" not in str(masked)
+
+
 def test_proxy_scheme_must_be_supported():
     profile = NetworkProfile(
         name="bad",
