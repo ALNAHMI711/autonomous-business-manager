@@ -40,6 +40,10 @@ def make_app(tmp_path):
     async def unlock_secrets():
         return {"ok": True}
 
+    @app.get("/api/system/status")
+    async def system_status():
+        return {"ok": True}
+
     return app
 
 
@@ -58,6 +62,7 @@ def test_non_admin_cannot_modify_global_network_controls(tmp_path):
         ("post", "/api/network/profiles"),
         ("post", "/api/network/test"),
         ("post", "/api/secrets/unlock"),
+        ("get", "/api/system/status"),
     ):
         response = getattr(client, method)(
             path,
@@ -82,5 +87,9 @@ def test_admin_can_access_global_network_and_secret_controls(tmp_path):
     ).status_code == 200
     assert client.post(
         "/api/secrets/unlock",
+        cookies={"session": "admin-session"},
+    ).status_code == 200
+    assert client.get(
+        "/api/system/status",
         cookies={"session": "admin-session"},
     ).status_code == 200
