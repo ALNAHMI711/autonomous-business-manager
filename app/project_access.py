@@ -61,7 +61,7 @@ if not hasattr(Database, "save_uploaded_file"):
 
 
 class ProjectAccessMiddleware:
-    """Fail closed on project-scoped API requests with durable owner checks."""
+    """Fail closed on project-scoped requests and global admin controls."""
 
     SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
     PROJECT_PATHS = {
@@ -70,6 +70,11 @@ class ProjectAccessMiddleware:
         "/api/browser/close/",
     }
     OWNER_LIST_PATHS = {"/api/projects", "/api/work-cards", "/api/approvals"}
+    GLOBAL_ADMIN_PATHS = {
+        "/api/network/profiles",
+        "/api/network/test",
+        "/api/secrets/unlock",
+    }
 
     def __init__(self, app: ASGIApp, database: Database) -> None:
         self.app = app
@@ -269,6 +274,11 @@ class ProjectAccessMiddleware:
             return
 
         method = scope.get("method", "GET").upper()
+
+        if path in self.GLOBAL_ADMIN_PATHS and user_id != OwnershipStore.BOOTSTRAP_USER_ID:
+            await self._reject(send, 403, "هذه العملية متاحة للمدير فقط.")
+            return
+
         query = parse_qs((scope.get("query_string") or b"").decode("utf-8", "ignore"))
         project_id: Any = query.get("project_id", [None])[0]
 
