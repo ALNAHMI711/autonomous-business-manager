@@ -74,6 +74,7 @@ class ProjectAccessMiddleware:
         "/api/network/profiles",
         "/api/network/test",
         "/api/secrets/unlock",
+        "/api/system/status",
     }
 
     def __init__(self, app: ASGIApp, database: Database) -> None:
