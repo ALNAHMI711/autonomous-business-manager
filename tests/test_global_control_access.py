@@ -1,4 +1,5 @@
 import pytest
+from fastapi import HTTPException
 from starlette.requests import Request
 
 from app import queue_runtime
@@ -25,7 +26,7 @@ async def test_global_control_rejects_non_admin(monkeypatch):
 
     monkeypatch.setattr(queue_runtime, "_require_control_session", require_session)
 
-    with pytest.raises(Exception) as exc:
+    with pytest.raises(HTTPException) as exc:
         await queue_runtime._require_admin_control(make_request("user-two-session"))
 
     assert exc.value.status_code == 403
