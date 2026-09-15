@@ -16,9 +16,16 @@ RUN apt-get update \
 COPY requirements.txt ./
 RUN pip install --upgrade pip \
     && pip install -r requirements.txt \
-    && pip install pytest
+    && pip install pytest \
+    && playwright install chromium
 
 COPY . .
+
+RUN useradd --create-home --uid 10001 appuser \
+    && mkdir -p /app/data /app/uploads /app/browser_profiles \
+    && chown -R appuser:appuser /app
+
+USER appuser
 
 RUN python -m compileall -q app
 
