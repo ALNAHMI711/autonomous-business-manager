@@ -11,9 +11,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,3 +40,6 @@ jobs:
 
       - name: Unit tests
         run: pytest -q
+
+      - name: Build container
+        run: docker build --tag autonomous-business-manager:ci .
