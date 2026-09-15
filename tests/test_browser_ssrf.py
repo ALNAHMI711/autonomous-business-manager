@@ -12,10 +12,11 @@ def manager(tmp_path):
     return BrowserManager(Settings(), None)
 
 
-def test_http_is_limited_to_localhost(tmp_path):
+def test_http_is_limited_to_localhost_hostname(tmp_path):
     browser = manager(tmp_path)
     assert browser._validate_url("http://localhost:8000") == "http://localhost:8000"
-    assert browser._validate_url("http://127.0.0.1:8000") == "http://127.0.0.1:8000"
+    with pytest.raises(ValueError):
+        browser._validate_url("http://127.0.0.1:8000")
     with pytest.raises(ValueError):
         browser._validate_url("http://example.com")
 
