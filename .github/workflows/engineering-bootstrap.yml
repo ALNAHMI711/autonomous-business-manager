@@ -9,8 +9,10 @@ on:
       - main
   workflow_dispatch:
 
+# This workflow is validation-only. It must never receive repository write access
+# or mutate branches automatically.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   bootstrap:
@@ -31,20 +33,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pytest
 
-      - name: Apply engineering patch
-        run: python scripts/bootstrap_engineering.py
+      - name: Validate engineering patch script
+        run: python -m compileall -q scripts/bootstrap_engineering.py
 
       - name: Compile check
         run: python -m compileall -q app
 
       - name: Unit tests
         run: pytest -q
-
-      - name: Commit generated engineering changes
-        if: github.event_name == 'push'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app frontend requirements.txt ENGINEERING_AUDIT.md
-          git diff --cached --quiet || git commit -m "feat: add project network routing and engineering baseline"
-          git push origin HEAD:codex/engineering-network-v3
