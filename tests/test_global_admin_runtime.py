@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from app.database import Database
@@ -54,7 +56,8 @@ async def test_non_admin_is_blocked_from_global_admin_paths(tmp_path, path):
     messages = await collect_response(middleware, make_scope(path))
 
     assert messages[0]["status"] == 403
-    assert "المدير".encode("utf-8") in messages[1]["body"]
+    payload = json.loads(messages[1]["body"].decode("utf-8"))
+    assert payload["detail"] == "هذه العملية متاحة للمدير فقط."
 
 
 @pytest.mark.asyncio
