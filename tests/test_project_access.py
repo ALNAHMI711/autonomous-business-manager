@@ -70,6 +70,26 @@ def make_app(tmp_path):
     async def chat(payload: dict):
         return payload
 
+    @app.post("/api/browser/open")
+    async def browser_open(payload: dict):
+        return payload
+
+    @app.post("/api/browser/navigate")
+    async def browser_navigate(payload: dict):
+        return payload
+
+    @app.post("/api/browser/click")
+    async def browser_click(payload: dict):
+        return payload
+
+    @app.post("/api/browser/fill")
+    async def browser_fill(payload: dict):
+        return payload
+
+    @app.post("/api/browser/close/{project_id}")
+    async def browser_close(project_id: int):
+        return {"project_id": project_id}
+
     return app
 
 
@@ -158,6 +178,34 @@ def test_foreign_project_id_in_json_body_is_rejected(tmp_path):
     response = client.post(
         "/api/chat",
         json={"message": "hello", "project_id": 2},
+        cookies={"session": "user-one-session"},
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/api/browser/open", {"project_id": 2, "site": "example"}),
+        ("/api/browser/navigate", {"project_id": 2, "url": "https://example.com"}),
+        ("/api/browser/click", {"project_id": 2, "selector": "#submit"}),
+        ("/api/browser/fill", {"project_id": 2, "selector": "#name", "value": "x"}),
+    ],
+)
+def test_browser_mutations_cannot_cross_project_boundary(tmp_path, path, payload):
+    client = TestClient(make_app(tmp_path))
+    response = client.post(
+        path,
+        json=payload,
+        cookies={"session": "user-one-session"},
+    )
+    assert response.status_code == 404
+
+
+def test_browser_close_cannot_cross_project_boundary(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    response = client.post(
+        "/api/browser/close/2",
         cookies={"session": "user-one-session"},
     )
     assert response.status_code == 404
