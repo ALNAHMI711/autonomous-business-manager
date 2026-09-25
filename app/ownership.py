@@ -46,6 +46,14 @@ class OwnershipStore:
             cursor = connection.execute("INSERT INTO users(username, is_active, created_at) VALUES (?, 1, datetime('now'))", (username,))
             return int(cursor.lastrowid)
 
+    def delete_user(self, user_id: int) -> bool:
+        """Delete a non-bootstrap user and cascade its credentials."""
+        if not isinstance(user_id, int) or user_id <= self.BOOTSTRAP_USER_ID:
+            return False
+        with self._connect() as connection:
+            cursor = connection.execute("DELETE FROM users WHERE id = ? AND id != ?", (user_id, self.BOOTSTRAP_USER_ID))
+            return cursor.rowcount > 0
+
     def get_user(self, user_id: int) -> Optional[dict]:
         with self._connect() as connection:
             row = connection.execute("SELECT id, username, is_active, created_at FROM users WHERE id = ?", (user_id,)).fetchone()
