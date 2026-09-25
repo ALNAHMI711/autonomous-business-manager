@@ -10,17 +10,17 @@ This checklist tracks the remaining security gates before production deployment.
 - Global events are administrator-only; project events are filtered by project ownership.
 - Uploaded filenames are normalized and stored with generated prefixes.
 - Network profile masking does not expose stored passwords.
+- Admin user creation rolls back the ownership row when credential provisioning fails.
 - CI has compile and pytest gates.
 
 ## Remaining gates
 
-1. **Atomic user creation** — if credential creation fails after the ownership user is inserted, remove/rollback the newly-created user so orphan accounts cannot remain.
-2. **Secrets ownership model** — the current `secrets` table is global. Keep secret management administrator-only until project/user-scoped ownership is implemented.
-3. **Network profile ownership model** — profiles are global. Keep profile management administrator-only until project/user-scoped ownership is implemented.
-4. **Approval mutation audit** — verify every approval/work-card mutation has an ownership check at the API boundary.
-5. **Browser session mutation audit** — verify every browser operation is project-owned and cannot operate on another project's session.
-6. **Events integration tests** — prove that a normal user receives only events for owned projects and never global events; prove administrator visibility of global events.
-7. **Deployment hardening** — production HTTPS, secure cookies, CSRF secret, secret injection, database backup/restore, and monitoring must be verified in an actual deployment environment.
-8. **Repository governance** — protect `main` with required CI checks and prevent direct unreviewed production changes.
+1. **Secrets ownership model** — the current `secrets` table is global. Keep secret management administrator-only until project/user-scoped ownership is implemented.
+2. **Network profile ownership model** — profiles are global. Keep profile management administrator-only until project/user-scoped ownership is implemented.
+3. **Approval mutation audit** — verify every approval/work-card mutation has an ownership check at the API boundary.
+4. **Browser session mutation audit** — verify every browser operation is project-owned and cannot operate on another project's session.
+5. **Events integration tests** — prove that a normal user receives only events for owned projects and never global events; prove administrator visibility of global events.
+6. **Deployment hardening** — production HTTPS, secure cookies, CSRF secret, secret injection, database backup/restore, and monitoring must be verified in an actual deployment environment.
+7. **Repository governance** — protect `main` with required CI checks and prevent direct unreviewed production changes.
 
 No item in this document should be interpreted as evidence that production deployment is complete; each gate requires verification.
