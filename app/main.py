@@ -501,8 +501,14 @@ async def create_admin_user(
 
     try:
         _active_sessions.credentials.set_password(user_id, request.password)
-    except Exception:
-        raise HTTPException(status_code=400, detail="تعذر إنشاء كلمة المرور.")
+    except Exception as exc:
+        # Roll back the ownership row if credential provisioning fails.
+        # This prevents an unusable/orphaned account from remaining active.
+        try:
+            ownership.delete_user(user_id)
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail="تعذر إنشاء كلمة المرور.") from exc
 
     try:
         db.create_event(
