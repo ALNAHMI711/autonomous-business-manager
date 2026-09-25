@@ -200,6 +200,15 @@ def _require_session(
     return token
 
 
+def _require_admin_session(
+    request: Request,
+) -> str:
+    token = _require_session(request)
+    if _active_sessions.user_id(token) != OwnershipStore.BOOTSTRAP_USER_ID:
+        raise HTTPException(status_code=403, detail="هذه العملية متاحة للمدير فقط.")
+    return token
+
+
 # ================================================================
 # الاتصال بالإنترنت
 # ================================================================
@@ -950,7 +959,7 @@ async def browser_close(
 
 @app.get("/api/network/profiles")
 async def network_profiles(
-    _: str = Depends(_require_session),
+    _: str = Depends(_require_admin_session),
 ):
     return {
         "profiles": network_manager.list_profiles(),
@@ -960,7 +969,7 @@ async def network_profiles(
 @app.post("/api/network/profiles")
 async def create_network_profile(
     request: NetworkProfileRequest,
-    _: str = Depends(_require_session),
+    _: str = Depends(_require_admin_session),
 ):
     profile = NetworkProfile(
         name=request.name,
@@ -986,7 +995,7 @@ async def create_network_profile(
 @app.post("/api/network/test")
 async def test_network_profile(
     request: NetworkTestRequest,
-    _: str = Depends(_require_session),
+    _: str = Depends(_require_admin_session),
 ):
     result = await network_manager.test_connectivity(
         request.name
@@ -1005,7 +1014,7 @@ async def test_network_profile(
 @app.post("/api/secrets/unlock")
 async def unlock_secrets(
     request: SecretPanelRequest,
-    _: str = Depends(_require_session),
+    _: str = Depends(_require_admin_session),
 ):
     if not _verify_admin_password(
         request.password
