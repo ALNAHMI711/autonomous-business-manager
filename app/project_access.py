@@ -340,6 +340,12 @@ class ProjectAccessMiddleware:
             except (UnicodeDecodeError, json.JSONDecodeError):
                 payload = {}
 
+        if path == "/api/browser/open" and isinstance(payload, dict):
+            network_profile = payload.get("network_profile")
+            if network_profile and user_id != OwnershipStore.BOOTSTRAP_USER_ID:
+                await self._reject(send, 403, "استخدام ملفات الشبكة العامة متاح للمدير فقط.")
+                return
+
         if project_id is not None and not self._validate_project(project_id, user_id):
             await self._reject(send, 404, "المشروع غير موجود.")
             return
