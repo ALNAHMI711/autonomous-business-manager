@@ -4,11 +4,12 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     volumes:
       - ./data:/app/data
       - ./browser_profiles:/app/browser_profiles
+      - ./uploads:/app/uploads
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
       interval: 30s
@@ -16,5 +17,22 @@ services:
       retries: 3
       start_period: 30s
 
-  # Optional reverse proxy. Put TLS termination here when a domain is available.
-  # Do not expose port 8000 publicly in production; restrict it with the cloud firewall.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN}
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
