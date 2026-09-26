@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from cryptography.fernet import Fernet
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -57,8 +58,19 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_admin_credentials(self):
-        if self.app_env.lower() == "production" and not self.admin_password_hash.strip():
-            raise ValueError("ADMIN_PASSWORD_HASH must be configured in production")
+        if self.app_env.lower() == "production":
+            if not self.admin_password_hash.strip():
+                raise ValueError("ADMIN_PASSWORD_HASH must be configured in production")
+            if len(self.csrf_secret.strip()) < 32:
+                raise ValueError("CSRF_SECRET must contain at least 32 characters in production")
+            if not self.encryption_key.strip():
+                raise ValueError("ENCRYPTION_KEY must be configured in production")
+            try:
+                Fernet(self.encryption_key.encode("utf-8"))
+            except Exception as exc:
+                raise ValueError("ENCRYPTION_KEY must be a valid Fernet key in production") from exc
+            if self.session_secret == "change-this-session-secret":
+                raise ValueError("SESSION_SECRET must be changed in production")
 
         # Preserve the existing login endpoint while migrating its stored value
         # from plaintext to the Argon2id hash setting.
