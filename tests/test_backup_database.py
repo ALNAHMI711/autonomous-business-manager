@@ -6,14 +6,19 @@ import pytest
 from deploy import backup_database
 
 
-def test_backup_database_creates_verified_copy(tmp_path: Path, monkeypatch):
-    database = tmp_path / "business_manager.db"
-    destination = tmp_path / "backups" / "snapshot.db"
-
+def _create_database(root: Path) -> Path:
+    database = root / "data" / "business_manager.db"
+    database.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(database) as connection:
         connection.execute("CREATE TABLE sample (id INTEGER PRIMARY KEY, value TEXT)")
         connection.execute("INSERT INTO sample(value) VALUES ('ok')")
         connection.commit()
+    return database
+
+
+def test_backup_database_creates_verified_copy(tmp_path: Path, monkeypatch):
+    _create_database(tmp_path)
+    destination = tmp_path / "backups" / "snapshot.db"
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("sys.argv", ["backup_database.py", str(destination)])
@@ -27,9 +32,8 @@ def test_backup_database_creates_verified_copy(tmp_path: Path, monkeypatch):
 
 
 def test_backup_database_refuses_overwrite(tmp_path: Path, monkeypatch):
-    database = tmp_path / "business_manager.db"
+    _create_database(tmp_path)
     destination = tmp_path / "snapshot.db"
-    database.touch()
     destination.write_text("existing")
 
     monkeypatch.chdir(tmp_path)
