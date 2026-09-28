@@ -43,3 +43,6 @@ jobs:
 
       - name: Build container
         run: docker build --tag autonomous-business-manager:ci .
+
+      - name: Validate Compose configuration
+        run: docker compose config
