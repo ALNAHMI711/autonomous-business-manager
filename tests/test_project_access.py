@@ -91,6 +91,14 @@ def make_app(tmp_path):
     async def browser_close(project_id: int):
         return {"project_id": project_id}
 
+    @app.get("/api/network/profiles")
+    async def network_profiles():
+        return {"profiles": []}
+
+    @app.post("/api/secrets/unlock")
+    async def unlock_secrets(payload: dict):
+        return {"success": True}
+
     return app
 
 
@@ -181,3 +189,17 @@ def test_browser_close_cannot_cross_project_boundary(tmp_path):
     client = TestClient(make_app(tmp_path))
     response = client.post("/api/browser/close/2", cookies={"session": "user-one-session"})
     assert response.status_code == 404
+
+
+@pytest.mark.parametrize("path,method", [("/api/network/profiles", "get"), ("/api/secrets/unlock", "post"), ("/api/system/status", "get")])
+def test_global_admin_routes_reject_regular_users(tmp_path, path, method):
+    client = TestClient(make_app(tmp_path))
+    response = getattr(client, method)(path, json={} if method == "post" else None, cookies={"session": "user-two-session"})
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize("path,method", [("/api/network/profiles", "get"), ("/api/secrets/unlock", "post"), ("/api/system/status", "get")])
+def test_global_admin_routes_allow_bootstrap_admin(tmp_path, path, method):
+    client = TestClient(make_app(tmp_path))
+    response = getattr(client, method)(path, json={} if method == "post" else None, cookies={"session": "user-one-session"})
+    assert response.status_code == 200
