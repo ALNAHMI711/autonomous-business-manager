@@ -340,6 +340,10 @@ class ProjectAccessMiddleware:
             except (UnicodeDecodeError, json.JSONDecodeError):
                 payload = {}
 
+        if path == "/api/chat" and method == "POST" and project_id is None:
+            await self._reject(send, 400, "يجب تحديد مشروع قبل بدء المحادثة.")
+            return
+
         if path == "/api/browser/open" and isinstance(payload, dict):
             network_profile = payload.get("network_profile")
             if network_profile and user_id != OwnershipStore.BOOTSTRAP_USER_ID:
