@@ -99,6 +99,10 @@ def make_app(tmp_path):
     async def unlock_secrets(payload: dict):
         return {"success": True}
 
+    @app.get("/api/system/status")
+    async def system_status():
+        return {"status": "ok"}
+
     return app
 
 
