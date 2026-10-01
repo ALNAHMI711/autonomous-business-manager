@@ -44,5 +44,8 @@ jobs:
       - name: Build container
         run: docker build --tag autonomous-business-manager:ci .
 
+      - name: Prepare non-production Compose environment
+        run: cp .env.example .env
+
       - name: Validate Compose configuration
-        run: docker compose config
+        run: docker compose config --quiet
