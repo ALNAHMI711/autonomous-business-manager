@@ -174,6 +174,17 @@ def test_foreign_project_id_in_json_body_is_rejected(tmp_path):
     assert response.status_code == 404
 
 
+@pytest.mark.parametrize("payload", [
+    {"message": "hello"},
+    {"message": "hello", "project_id": None},
+])
+def test_chat_requires_project_context(tmp_path, payload):
+    client = TestClient(make_app(tmp_path))
+    response = client.post("/api/chat", json=payload, cookies={"session": "user-one-session"})
+    assert response.status_code == 400
+    assert response.json()["detail"] == "يجب تحديد مشروع قبل بدء المحادثة."
+
+
 @pytest.mark.parametrize(
     ("path", "payload"),
     [
