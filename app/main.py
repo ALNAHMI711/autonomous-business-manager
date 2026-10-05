@@ -953,6 +953,18 @@ async def browser_close(
     }
 
 
+@app.get("/api/browser/status/{project_id}")
+async def browser_status(
+    project_id: int,
+    _: str = Depends(_require_session),
+):
+    result = await browser.get_status(project_id)
+    return {
+        "success": True,
+        "result": result,
+    }
+
+
 # ================================================================
 # الشبكة
 # ================================================================
