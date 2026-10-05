@@ -149,6 +149,15 @@ class BrowserManager:
 
         return url
 
+    async def _guard_request(self, route: Any) -> None:
+        """Re-check every browser request to prevent SSRF through redirects/subresources."""
+        try:
+            self._validate_url(route.request.url)
+        except ValueError:
+            await route.abort("blockedbyclient")
+            return
+        await route.continue_()
+
     async def open_project(self, project_id: int, site: str, proxy: Optional[dict[str, Any]] = None, network_profile_name: Optional[str] = None) -> dict[str, Any]:
         await self.initialize()
         if self._browser is None:
@@ -171,6 +180,7 @@ class BrowserManager:
         if storage_state.exists():
             context_kwargs["storage_state"] = str(storage_state)
         context = await self._browser.new_context(**context_kwargs)
+        await context.route("**/*", self._guard_request)
         page = await context.new_page()
         self._contexts[project_id] = context
         self._pages[project_id] = page
