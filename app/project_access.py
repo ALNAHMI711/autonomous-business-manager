@@ -68,6 +68,7 @@ class ProjectAccessMiddleware:
         "/api/projects/",
         "/api/chat/",
         "/api/browser/close/",
+        "/api/browser/status/",
     }
     OWNER_LIST_PATHS = {"/api/projects", "/api/work-cards", "/api/approvals"}
     GLOBAL_ADMIN_PATHS = {
