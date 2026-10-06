@@ -631,7 +631,7 @@ async function browserClose() {
   try {
     const projectId = selectedBrowserProject();
 
-    await api("/api/browser/close", {
+    await api(`/api/browser/close/${projectId}`, {
       method: "POST",
       body: JSON.stringify({
         project_id: projectId,
@@ -769,7 +769,7 @@ async function verifySecrets(event) {
 
   try {
     const data = await api(
-      "/api/secrets/panel/verify",
+      "/api/secrets/unlock",
       {
         method: "POST",
         body: JSON.stringify({
