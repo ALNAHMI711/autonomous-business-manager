@@ -543,14 +543,12 @@ class TaskManager:
             await self._set_status(
                 work_card_id,
                 "error",
-                error_message=str(exc),
+                error_message="execution_failed",
             )
 
             await self._event(
                 event_type="task_error",
-                message=(
-                    f"حدث خطأ أثناء تنفيذ المهمة: {exc}"
-                ),
+                message="حدث خطأ أثناء تنفيذ المهمة. راجع سجل النظام للتفاصيل.",
                 project_id=project_id,
                 work_card_id=work_card_id,
             )
