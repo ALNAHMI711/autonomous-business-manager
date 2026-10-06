@@ -848,9 +848,10 @@ async def work_card_action(
     except HTTPException:
         raise
     except Exception as exc:
+        # Never expose internal exception text to API clients.
         raise HTTPException(
             status_code=500,
-            detail=str(exc),
+            detail="تعذر تنفيذ الإجراء المطلوب.",
         ) from exc
 
 
