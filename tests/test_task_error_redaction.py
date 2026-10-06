@@ -50,8 +50,14 @@ async def test_execution_error_is_redacted_from_persistent_state():
 
     assert database.card["status"] == "error"
     assert database.card["error_message"] == "execution_failed"
-    assert "TOP-SECRET" not in str(database.card)
-    error_events = [event for event in database.events if event["event_type"] == "task_error"]
+    assert all("TOP-SECRET" not in str(update[2]) for update in database.updates)
+
+    error_events = [
+        event for event in database.events
+        if event["event_type"] == "task_error"
+    ]
     assert error_events
     assert "TOP-SECRET" not in str(error_events[-1])
-    assert error_events[-1]["message"] == "حدث خطأ أثناء تنفيذ المهمة. راجع سجل النظام للتفاصيل."
+    assert error_events[-1]["message"] == (
+        "حدث خطأ أثناء تنفيذ المهمة. راجع سجل النظام للتفاصيل."
+    )
