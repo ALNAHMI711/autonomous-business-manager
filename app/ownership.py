@@ -51,6 +51,12 @@ class OwnershipStore:
         if not isinstance(user_id, int) or user_id <= self.BOOTSTRAP_USER_ID:
             return False
         with self._connect() as connection:
+            owned_projects = connection.execute(
+                "SELECT 1 FROM projects WHERE owner_id = ? LIMIT 1",
+                (user_id,),
+            ).fetchone()
+            if owned_projects is not None:
+                return False
             cursor = connection.execute(
                 "DELETE FROM users WHERE id = ? AND id != ?",
                 (user_id, self.BOOTSTRAP_USER_ID),
