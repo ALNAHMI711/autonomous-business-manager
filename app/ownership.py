@@ -47,12 +47,21 @@ class OwnershipStore:
             return int(cursor.lastrowid)
 
     def delete_user(self, user_id: int) -> bool:
-        """Delete a non-bootstrap user and cascade its credentials."""
+        """Delete a non-bootstrap user and revoke all durable sessions."""
         if not isinstance(user_id, int) or user_id <= self.BOOTSTRAP_USER_ID:
             return False
         with self._connect() as connection:
-            cursor = connection.execute("DELETE FROM users WHERE id = ? AND id != ?", (user_id, self.BOOTSTRAP_USER_ID))
-            return cursor.rowcount > 0
+            cursor = connection.execute(
+                "DELETE FROM users WHERE id = ? AND id != ?",
+                (user_id, self.BOOTSTRAP_USER_ID),
+            )
+            if cursor.rowcount <= 0:
+                return False
+            connection.execute(
+                "DELETE FROM auth_sessions WHERE user_id = ?",
+                (user_id,),
+            )
+            return True
 
     def get_user(self, user_id: int) -> Optional[dict]:
         with self._connect() as connection:
