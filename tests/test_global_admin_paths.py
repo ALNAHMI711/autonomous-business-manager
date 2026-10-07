@@ -58,7 +58,7 @@ def test_global_admin_routes_require_admin_dependency():
     }
 
     for route in app.routes:
-        methods = set(route.methods or ())
+        methods = set(getattr(route, "methods", ()) or ())
         if route.path not in protected:
             continue
         if not methods.intersection(protected[route.path]):
