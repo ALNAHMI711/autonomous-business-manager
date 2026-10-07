@@ -26,7 +26,10 @@ def response_payload(response):
 
 @pytest.mark.asyncio
 async def test_events_hide_foreign_project_and_global_events_from_regular_user(monkeypatch):
-    monkeypatch.setattr(queue_runtime, "_require_control_session", lambda _request: 2)
+    async def require_user(_request):
+        return 2
+
+    monkeypatch.setattr(queue_runtime, "_require_control_session", require_user)
     monkeypatch.setattr(queue_runtime.ownership, "list_project_ids", lambda _user_id: [10])
     monkeypatch.setattr(
         queue_runtime.db,
@@ -49,7 +52,10 @@ async def test_events_hide_foreign_project_and_global_events_from_regular_user(m
 @pytest.mark.asyncio
 async def test_events_allow_global_events_for_bootstrap_admin(monkeypatch):
     admin_id = OwnershipStore.BOOTSTRAP_USER_ID
-    monkeypatch.setattr(queue_runtime, "_require_control_session", lambda _request: admin_id)
+    async def require_admin(_request):
+        return admin_id
+
+    monkeypatch.setattr(queue_runtime, "_require_control_session", require_admin)
     monkeypatch.setattr(queue_runtime.ownership, "list_project_ids", lambda _user_id: [10])
     monkeypatch.setattr(
         queue_runtime.db,
