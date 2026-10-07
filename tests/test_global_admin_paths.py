@@ -47,6 +47,29 @@ def make_app(tmp_path):
     return app
 
 
+def test_global_admin_routes_require_admin_dependency():
+    from app.main import app, _require_admin_session
+
+    protected = {
+        "/api/network/profiles": {"GET", "POST"},
+        "/api/network/test": {"POST"},
+        "/api/secrets/unlock": {"POST"},
+        "/api/system/status": {"GET"},
+    }
+
+    for route in app.routes:
+        methods = set(route.methods or ())
+        if route.path not in protected:
+            continue
+        if not methods.intersection(protected[route.path]):
+            continue
+        dependency_callables = {
+            dependency.call
+            for dependency in route.dependant.dependencies
+        }
+        assert _require_admin_session in dependency_callables
+
+
 def test_non_admin_cannot_read_global_network_profiles(tmp_path):
     client = TestClient(make_app(tmp_path))
     response = client.get(
