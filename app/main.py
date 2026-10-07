@@ -1102,7 +1102,7 @@ async def upload_file(
 
 @app.get("/api/system/status")
 async def system_status(
-    _: str = Depends(_require_session),
+    _: str = Depends(_require_admin_session),
 ):
     return {
         "app": settings.app_name,
