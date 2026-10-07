@@ -21,6 +21,7 @@ def make_request() -> Request:
 
 @pytest.mark.asyncio
 async def test_global_network_admin_gate_rejects_non_admin(monkeypatch):
+    monkeypatch.setattr(main, "_require_session", lambda _request: "test-session")
     monkeypatch.setattr(main._active_sessions, "user_id", lambda _token: 2)
 
     with pytest.raises(HTTPException) as exc:
@@ -31,6 +32,7 @@ async def test_global_network_admin_gate_rejects_non_admin(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_global_network_admin_gate_allows_bootstrap_admin(monkeypatch):
+    monkeypatch.setattr(main, "_require_session", lambda _request: "test-session")
     monkeypatch.setattr(
         main._active_sessions,
         "user_id",
