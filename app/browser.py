@@ -192,6 +192,24 @@ class BrowserManager:
         await self._save_storage_state(project_id, site)
         return {"project_id": project_id, "url": page.url, "status": "connected", "session_expired": self.is_session_expired(page.url)}
 
+
+    async def open(
+        self,
+        project_id: int,
+        site: str,
+        url: Optional[str] = None,
+        network_profile: Optional[str] = None,
+        proxy: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Compatibility entry point for the API layer."""
+        target = url or site
+        return await self.open_project(
+            project_id=project_id,
+            site=target,
+            proxy=proxy,
+            network_profile_name=network_profile,
+        )
+
     async def navigate(self, project_id: int, url: str) -> dict[str, Any]:
         url = self._validate_url(url)
         page = self._pages.get(project_id)
