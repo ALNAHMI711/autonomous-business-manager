@@ -25,7 +25,7 @@ async def test_global_network_admin_gate_rejects_non_admin(monkeypatch):
     monkeypatch.setattr(main._active_sessions, "user_id", lambda _token: 2)
 
     with pytest.raises(HTTPException) as exc:
-        await main._require_admin_session(make_request())
+        main._require_admin_session(make_request())
 
     assert exc.value.status_code == 403
 
