@@ -877,11 +877,24 @@ async def browser_open(
     request: BrowserOpenRequest,
     _: str = Depends(_require_session),
 ):
+    requested_profile = (request.network_profile or "").strip()
+    bound_profile = network_manager.get_project_profile(request.project_id)
+    bound_name = bound_profile.name if bound_profile else "direct"
+
+    # A browser session may only use the profile explicitly bound to its
+    # project. This prevents a normal user from guessing another global
+    # profile name and borrowing its proxy credentials.
+    if requested_profile and requested_profile != bound_name:
+        raise HTTPException(
+            status_code=403,
+            detail="ملف الشبكة المطلوب غير مرتبط بهذا المشروع.",
+        )
+
     result = await browser.open(
         project_id=request.project_id,
         site=request.site,
         url=request.url,
-        network_profile=request.network_profile,
+        network_profile=(requested_profile or bound_name),
     )
 
     return {
