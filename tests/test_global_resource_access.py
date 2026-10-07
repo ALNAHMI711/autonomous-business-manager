@@ -30,8 +30,7 @@ async def test_global_network_admin_gate_rejects_non_admin(monkeypatch):
     assert exc.value.status_code == 403
 
 
-@pytest.mark.asyncio
-async def test_global_network_admin_gate_allows_bootstrap_admin(monkeypatch):
+def test_global_network_admin_gate_allows_bootstrap_admin(monkeypatch):
     monkeypatch.setattr(main, "_require_session", lambda _request: "test-session")
     monkeypatch.setattr(
         main._active_sessions,
@@ -39,4 +38,4 @@ async def test_global_network_admin_gate_allows_bootstrap_admin(monkeypatch):
         lambda _token: OwnershipStore.BOOTSTRAP_USER_ID,
     )
 
-    assert await main._require_admin_session(make_request()) == "test-session"
+    assert main._require_admin_session(make_request()) == "test-session"
