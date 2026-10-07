@@ -91,6 +91,10 @@ def make_app(tmp_path):
     async def browser_close(project_id: int):
         return {"project_id": project_id}
 
+    @app.get("/api/browser/status/{project_id}")
+    async def browser_status(project_id: int):
+        return {"project_id": project_id, "status": "ready"}
+
     @app.get("/api/network/profiles")
     async def network_profiles():
         return {"profiles": []}
@@ -206,7 +210,28 @@ def test_browser_close_cannot_cross_project_boundary(tmp_path):
     assert response.status_code == 404
 
 
-@pytest.mark.parametrize("path,method", [("/api/network/profiles", "get"), ("/api/secrets/unlock", "post"), ("/api/system/status", "get")])
+@pytest.mark.parametrize(
+    "path",
+    ["/api/browser/status/2"],
+)
+def test_browser_status_cannot_cross_project_boundary(tmp_path, path):
+    client = TestClient(make_app(tmp_path))
+    response = client.get(path, cookies={"session": "user-one-session"})
+    assert response.status_code == 404
+
+
+def test_browser_status_owner_can_access_own_project(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    response = client.get("/api/browser/status/1", cookies={"session": "user-one-session"})
+    assert response.status_code == 200
+    assert response.json() == {"project_id": 1, "status": "ready"}
+
+
+@pytest.mark.parametrize("path,method", [
+    ("/api/network/profiles", "get"),
+    ("/api/secrets/unlock", "post"),
+    ("/api/system/status", "get"),
+])
 def test_global_admin_routes_reject_regular_users(tmp_path, path, method):
     client = TestClient(make_app(tmp_path))
     if method == "post":
@@ -216,7 +241,11 @@ def test_global_admin_routes_reject_regular_users(tmp_path, path, method):
     assert response.status_code == 403
 
 
-@pytest.mark.parametrize("path,method", [("/api/network/profiles", "get"), ("/api/secrets/unlock", "post"), ("/api/system/status", "get")])
+@pytest.mark.parametrize("path,method", [
+    ("/api/network/profiles", "get"),
+    ("/api/secrets/unlock", "post"),
+    ("/api/system/status", "get"),
+])
 def test_global_admin_routes_allow_bootstrap_admin(tmp_path, path, method):
     client = TestClient(make_app(tmp_path))
     if method == "post":
