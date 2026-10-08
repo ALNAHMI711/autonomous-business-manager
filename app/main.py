@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.agent import Agent
+from app.admin_auth import AdminPasswordVerifier
 from app.auth_compat import PersistentSessionSet
 from app.approval import ApprovalManager
 from app.browser import BrowserManager
@@ -168,16 +169,15 @@ def _cookie_secure() -> bool:
     return settings.app_env.lower() == "production"
 
 
+_admin_password_verifier = AdminPasswordVerifier(
+    password_hash=settings.admin_password_hash,
+    legacy_password=settings.admin_password,
+    production=settings.app_env.lower() == "production",
+)
+
+
 def _verify_admin_password(password: str) -> bool:
-    configured = settings.admin_password
-
-    if not configured:
-        return False
-
-    return security.secure_compare(
-        password,
-        configured,
-    )
+    return _admin_password_verifier.verify(password)
 
 
 def _get_session_from_request(
