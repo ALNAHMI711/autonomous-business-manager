@@ -1,0 +1,18 @@
+# SQLite backup schedule example
+#
+# Install on the host running docker compose. Replace APP_DIR with the
+# absolute repository path before installing this entry in root's or the
+# deployment user's crontab.
+#
+# The backup utility uses SQLite's online-backup API and writes into the
+# mounted ./data volume. It refuses to overwrite an existing backup.
+#
+# Daily at 03:15 UTC:
+15 3 * * * cd /opt/autonomous-business-manager && docker compose exec -T app python deploy/backup_database.py >> /var/log/autonomous-business-manager-backup.log 2>&1
+
+# Operational requirements:
+# - Keep /opt/autonomous-business-manager/data/backups on protected storage.
+# - Monitor the cron log for failures.
+# - Copy backups to separate durable storage; a backup on the same disk is not disaster recovery.
+# - Periodically run deploy/restore_database.py against a test destination and verify application startup.
+# - Never place .env, encryption keys, or other credentials in the backup destination's public path.
