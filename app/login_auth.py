@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.auth_compat import PersistentSessionSet
+from app.passwords import PasswordService
 from app.security import SecurityManager
 from app.user_credentials import UserCredentialStore
 
@@ -24,10 +25,12 @@ class LoginAuthenticator:
         sessions: PersistentSessionSet,
         security: SecurityManager,
         credentials: UserCredentialStore | None = None,
+        password_service: PasswordService | None = None,
     ) -> None:
         self.sessions = sessions
         self.security = security
         self.credentials = credentials or sessions.credentials
+        self.passwords = password_service or PasswordService()
         self.credentials.initialize()
 
     def authenticate(self, username: str, password: str) -> AuthenticatedUser | None:
@@ -43,18 +46,19 @@ class LoginAuthenticator:
         # only the configured bootstrap admin credential.
         if username == self.ADMIN_USERNAME:
             configured_hash = getattr(self.security.settings, "admin_password_hash", "")
-            if configured_hash and self.security.secure_compare(password, configured_hash):
+            if configured_hash and self.passwords.verify(password, configured_hash):
                 return AuthenticatedUser(
                     user_id=self.ADMIN_USER_ID,
                     username=self.ADMIN_USERNAME,
                 )
 
             configured_legacy = getattr(self.security.settings, "admin_password", "")
-            if configured_legacy and self.security.secure_compare(password, configured_legacy):
-                return AuthenticatedUser(
-                    user_id=self.ADMIN_USER_ID,
-                    username=self.ADMIN_USERNAME,
-                )
+            if configured_legacy and not configured_legacy.startswith("$argon2"):
+                if self.security.secure_compare(password, configured_legacy):
+                    return AuthenticatedUser(
+                        user_id=self.ADMIN_USER_ID,
+                        username=self.ADMIN_USERNAME,
+                    )
 
         return None
 
