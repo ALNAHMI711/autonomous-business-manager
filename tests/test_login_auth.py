@@ -8,6 +8,7 @@ from app.user_credentials import UserCredentialStore
 
 class FakeSettings:
     admin_password = "legacy-admin-password"
+    admin_password_hash = ""
 
 
 class FakeSecurity:
@@ -69,6 +70,27 @@ def test_bootstrap_admin_legacy_login_remains_available(tmp_path: Path):
     assert admin is not None
     assert admin.user_id == 1
     assert admin.username == "admin"
+
+
+def test_bootstrap_admin_argon2_hash_login_uses_password_verifier(tmp_path: Path):
+    database_path = tmp_path / "app.db"
+    ownership = OwnershipStore(str(database_path))
+    ownership.initialize()
+    credentials = UserCredentialStore(str(database_path))
+    settings = FakeSettings()
+    settings.admin_password = ""
+    settings.admin_password_hash = PasswordService().hash("argon2-admin-password")
+    security = FakeSecurity()
+    security.settings = settings
+    sessions = FakeSessions(credentials)
+    authenticator = LoginAuthenticator(sessions, security)
+
+    admin = authenticator.authenticate("admin", "argon2-admin-password")
+    rejected = authenticator.authenticate("admin", "wrong-password")
+
+    assert admin is not None
+    assert admin.user_id == 1
+    assert rejected is None
 
 
 def test_invalid_named_user_is_rejected(tmp_path: Path):
