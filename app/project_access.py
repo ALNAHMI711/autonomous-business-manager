@@ -282,11 +282,12 @@ class ProjectAccessMiddleware:
             return
 
         query = parse_qs((scope.get("query_string") or b"").decode("utf-8", "ignore"))
-        project_id: Any = query.get("project_id", [None])[0]
+        query_project: Any = query.get("project_id", [None])[0]
+        path_project: Any = None
 
         for prefix in self.PROJECT_PATHS:
             if path.startswith(prefix):
-                project_id = self._path_id(path, prefix)
+                path_project = self._path_id(path, prefix)
                 break
 
         if path.startswith("/api/work-cards/"):
@@ -299,7 +300,8 @@ class ProjectAccessMiddleware:
             if method != "POST":
                 await self._reject(send, 405, "طريقة الطلب غير مدعومة.")
                 return
-            if project_id is None or not self._validate_project(project_id, user_id):
+            upload_project = query_project
+            if upload_project is None or not self._validate_project(upload_project, user_id):
                 await self._reject(send, 404, "المشروع غير موجود.")
                 return
             body, replay_receive = await self._read_body(receive)
@@ -322,7 +324,7 @@ class ProjectAccessMiddleware:
                 (key, str(len(rewritten)).encode("ascii")) if key.lower() == b"content-length" else (key, value)
                 for key, value in headers
             ]
-            project_token = _current_upload_project_id.set(int(project_id))
+            project_token = _current_upload_project_id.set(int(upload_project))
             filename_token = _current_upload_filename.set(original_name)
             try:
                 await self.app(upload_scope, upload_replay, send)
@@ -333,13 +335,28 @@ class ProjectAccessMiddleware:
 
         body = b""
         replay_receive = receive
-        if project_id is None and method not in self.SAFE_METHODS:
+        payload: dict[str, Any] = {}
+        body_project: Any = None
+        if method not in self.SAFE_METHODS:
+            # Always inspect the body: a request may carry a project id in the
+            # path/query *and* the body, and the handler may read either one.
+            # Every id present must belong to the caller, otherwise an attacker
+            # could pass an owned id in the query string and a victim's id in
+            # the JSON body.
             body, replay_receive = await self._read_body(receive)
             try:
-                payload = json.loads(body.decode("utf-8")) if body else {}
-                project_id = payload.get("project_id")
+                parsed = json.loads(body.decode("utf-8")) if body else {}
             except (UnicodeDecodeError, json.JSONDecodeError):
-                payload = {}
+                parsed = {}
+            if isinstance(parsed, dict):
+                payload = parsed
+                body_project = payload.get("project_id")
+
+        candidates = [
+            value for value in (path_project, query_project, body_project)
+            if value is not None
+        ]
+        project_id: Any = candidates[0] if candidates else None
 
         if path == "/api/chat" and method == "POST" and project_id is None:
             await self._reject(send, 400, "يجب تحديد مشروع قبل بدء المحادثة.")
@@ -351,9 +368,10 @@ class ProjectAccessMiddleware:
                 await self._reject(send, 403, "استخدام ملفات الشبكة العامة متاح للمدير فقط.")
                 return
 
-        if project_id is not None and not self._validate_project(project_id, user_id):
-            await self._reject(send, 404, "المشروع غير موجود.")
-            return
+        for candidate in candidates:
+            if not self._validate_project(candidate, user_id):
+                await self._reject(send, 404, "المشروع غير موجود.")
+                return
 
         if path == "/api/projects" and method == "POST":
             proxy = await self._owner_filtered_send(path, user_id, send)
