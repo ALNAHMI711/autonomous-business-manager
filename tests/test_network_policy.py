@@ -55,6 +55,9 @@ class FakeNetwork:
     def get_profile(self, name):
         return self.profile if name == "p" else None
 
+    def get_profile_for_project(self, name, project_id):
+        return self.get_profile(name)
+
     def get_project_profile(self, project_id):
         return self.profile
 
@@ -143,3 +146,12 @@ def test_policy_delete_removes_encrypted_secret():
     assert manager.delete(1) is True
     assert manager.get(1) is None
     assert manager.delete(1) is False
+
+
+@pytest.mark.asyncio
+async def test_named_profile_missing_for_owner_blocks_instead_of_going_direct():
+    manager = NetworkPolicyManager(FakeDB(), FakeSecurity(), FakeNetwork())
+    manager.save(NetworkPolicy(1, profile_name="someone-elses-profile", fail_closed=True))
+    result = await manager.verify_project(1)
+    assert result["allowed"] is False
+    assert result["reason"] == "required_network_profile_missing"

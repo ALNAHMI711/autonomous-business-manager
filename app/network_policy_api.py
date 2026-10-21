@@ -50,6 +50,8 @@ async def save_policy(
     project_id: int = Depends(require_owned_project),
 ):
     policy = NetworkPolicy(project_id=project_id, **payload.model_dump())
+    if policy.profile_name and manager.network.get_profile_for_project(policy.profile_name, project_id) is None:
+        raise HTTPException(status_code=400, detail="ملف الشبكة غير موجود لهذا المشروع.")
     manager.save(policy)
     db.create_event(
         event_type="network_policy_changed",
