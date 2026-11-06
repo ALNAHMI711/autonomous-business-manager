@@ -20,6 +20,7 @@ from app.config import settings
 from app.connectivity import ConnectivityMonitor
 from app.database import Database
 from app.notifications import NotificationManager
+from app.user_secrets import UserSecretStore
 from app.network import NetworkManager, NetworkProfile
 from app.security import SecurityManager
 from app.rate_limit import LoginRateLimiter
@@ -42,6 +43,11 @@ db = Database(settings.database_path)
 security = SecurityManager(settings)
 
 network_manager = NetworkManager(
+    database=db,
+    security=security,
+)
+
+user_secrets = UserSecretStore(
     database=db,
     security=security,
 )
@@ -198,6 +204,19 @@ def _require_session(
         )
 
     return token
+
+
+def _require_user_id(
+    request: Request,
+) -> int:
+    token = _require_session(request)
+    user_id = _active_sessions.user_id(token)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail="جلسة الدخول غير صالحة أو منتهية.",
+        )
+    return int(user_id)
 
 
 def _require_admin_session(
@@ -895,6 +914,7 @@ async def browser_open(
         site=request.site,
         url=request.url,
         network_profile=(requested_profile or bound_name),
+        proxy=(bound_profile.to_playwright_proxy() if bound_profile else None),
     )
 
     return {
@@ -1031,6 +1051,134 @@ async def test_network_profile(
         "success": True,
         "result": result,
     }
+
+
+# ---- ملفات الشبكة الخاصة بكل مستخدم -------------------------------
+# كل مستخدم يرى ويدير ملفاته فقط؛ ملفات المدير العامة تبقى للمدير.
+
+class ProjectNetworkBindingRequest(BaseModel):
+    profile_name: Optional[str] = Field(default=None, max_length=80)
+
+
+@app.get("/api/network/my-profiles")
+async def my_network_profiles(
+    user_id: int = Depends(_require_user_id),
+):
+    return {
+        "profiles": network_manager.list_profiles(owner_id=user_id),
+    }
+
+
+@app.post("/api/network/my-profiles")
+async def create_my_network_profile(
+    request: NetworkProfileRequest,
+    user_id: int = Depends(_require_user_id),
+):
+    try:
+        profile = NetworkProfile(
+            name=request.name,
+            mode=request.mode,
+            proxy_server=request.proxy_server,
+            username=request.username,
+            password=request.password,
+            bypass=request.bypass,
+        )
+        saved = network_manager.save_profile(profile, owner_id=user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return {
+        "success": True,
+        "profile": {k: v for k, v in saved.items() if k != "id"},
+    }
+
+
+@app.post("/api/network/my-profiles/test")
+async def test_my_network_profile(
+    request: NetworkTestRequest,
+    user_id: int = Depends(_require_user_id),
+):
+    try:
+        result = await network_manager.test_connectivity(
+            request.name,
+            owner_id=user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    return {
+        "success": True,
+        "result": result,
+    }
+
+
+@app.delete("/api/network/my-profiles/{name}")
+async def delete_my_network_profile(
+    name: str,
+    user_id: int = Depends(_require_user_id),
+):
+    if not network_manager.delete_profile(name, owner_id=user_id):
+        raise HTTPException(status_code=404, detail="ملف الشبكة غير موجود.")
+    return {"success": True}
+
+
+@app.put("/api/projects/{project_id}/network-profile")
+async def bind_project_network_profile(
+    project_id: int,
+    request: ProjectNetworkBindingRequest,
+    _: int = Depends(_require_user_id),
+):
+    # ProjectAccessMiddleware has already verified project ownership, and
+    # bind_project resolves the profile inside the project owner's namespace.
+    try:
+        network_manager.bind_project(
+            project_id,
+            (request.profile_name or "").strip() or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"success": True}
+
+
+# ================================================================
+# أسرار المستخدم (معزولة لكل مستخدم)
+# ================================================================
+
+class UserSecretRequest(BaseModel):
+    value: str = Field(min_length=1, max_length=10000)
+    description: str = Field(default="", max_length=500)
+
+
+@app.get("/api/my-secrets")
+async def list_my_secrets(
+    user_id: int = Depends(_require_user_id),
+):
+    return {"secrets": user_secrets.list(user_id)}
+
+
+@app.put("/api/my-secrets/{name}")
+async def put_my_secret(
+    name: str,
+    request: UserSecretRequest,
+    user_id: int = Depends(_require_user_id),
+):
+    try:
+        saved = user_secrets.set(
+            user_id, name, request.value, request.description
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"success": True, "secret": saved}
+
+
+@app.delete("/api/my-secrets/{name}")
+async def delete_my_secret(
+    name: str,
+    user_id: int = Depends(_require_user_id),
+):
+    if not user_secrets.delete(user_id, name):
+        raise HTTPException(status_code=404, detail="السر غير موجود.")
+    return {"success": True}
 
 
 # ================================================================

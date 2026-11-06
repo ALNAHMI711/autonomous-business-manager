@@ -9,6 +9,9 @@ async def test_browser_open_rejects_unbound_network_profile(monkeypatch):
     class FakeProfile:
         name = "approved-proxy"
 
+        def to_playwright_proxy(self):
+            return {"server": "http://proxy.local:8080"}
+
     monkeypatch.setattr(main.network_manager, "get_project_profile", lambda _project_id: FakeProfile())
 
     async def fail_if_called(**_kwargs):
@@ -33,6 +36,9 @@ async def test_browser_open_uses_project_bound_profile(monkeypatch):
     class FakeProfile:
         name = "approved-proxy"
 
+        def to_playwright_proxy(self):
+            return {"server": "http://proxy.local:8080"}
+
     monkeypatch.setattr(main.network_manager, "get_project_profile", lambda _project_id: FakeProfile())
 
     captured = {}
@@ -52,3 +58,6 @@ async def test_browser_open_uses_project_bound_profile(monkeypatch):
 
     assert response["success"] is True
     assert captured["network_profile"] == "approved-proxy"
+    # The bound profile's proxy must really be handed to the browser, not just
+    # its name; otherwise traffic would silently go out directly.
+    assert captured["proxy"] == {"server": "http://proxy.local:8080"}

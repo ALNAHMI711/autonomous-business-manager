@@ -86,7 +86,12 @@ class NetworkPolicyManager:
 
         profile = None
         try:
-            profile = self.network.get_profile(policy.profile_name) if policy.profile_name else self.network.get_project_profile(project_id)
+            profile = self.network.get_profile_for_project(policy.profile_name, project_id) if policy.profile_name else self.network.get_project_profile(project_id)
+            if policy.profile_name and profile is None:
+                # A named profile that does not exist for this project's owner
+                # (deleted, or belonging to someone else) must never silently
+                # fall back to a direct connection.
+                return {"configured": True, "allowed": False, "reason": "required_network_profile_missing"}
             if policy.require_vpn and (profile is None or profile.mode != "proxy"):
                 return {"configured": True, "allowed": False, "reason": "required_network_profile_missing"}
 

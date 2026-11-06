@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -244,10 +245,59 @@ class Database:
             self._migrate_uploaded_files(
                 connection
             )
+            self._migrate_secrets_owner(
+                connection
+            )
 
     # =========================================================
     # ترقية قاعدة البيانات القديمة
     # =========================================================
+
+    def _migrate_secrets_owner(
+        self,
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Add secrets.owner_id (NULL = system-managed) and backfill it.
+
+        Network profile secrets already carry their owner in the name
+        (``network_profile:u<id>:<name>``; un-prefixed names belong to the
+        bootstrap administrator, id 1). Backfilling makes ownership explicit
+        in the data instead of only implicit in a naming convention.
+        """
+
+        columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(secrets)"
+            ).fetchall()
+        }
+
+        if "owner_id" not in columns:
+            connection.execute(
+                "ALTER TABLE secrets ADD COLUMN owner_id INTEGER"
+            )
+
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_secrets_owner "
+            "ON secrets(owner_id)"
+        )
+
+        rows = connection.execute(
+            "SELECT id, name FROM secrets "
+            "WHERE owner_id IS NULL "
+            "AND name LIKE 'network_profile:%'"
+        ).fetchall()
+
+        for row in rows:
+            match = re.match(
+                r"^network_profile:u(\d+):",
+                row["name"],
+            )
+            owner = int(match.group(1)) if match else 1
+            connection.execute(
+                "UPDATE secrets SET owner_id = ? WHERE id = ?",
+                (owner, row["id"]),
+            )
 
     def _migrate_uploaded_files(
         self,
@@ -1027,6 +1077,7 @@ class Database:
         name: str,
         encrypted_value: str,
         description: str = "",
+        owner_id: Optional[int] = None,
     ) -> dict[str, Any]:
 
         now = self._now()
@@ -1039,9 +1090,10 @@ class Database:
                     encrypted_value,
                     description,
                     created_at,
-                    updated_at
+                    updated_at,
+                    owner_id
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     name,
@@ -1049,6 +1101,7 @@ class Database:
                     description,
                     now,
                     now,
+                    owner_id,
                 ),
             )
 
@@ -1095,22 +1148,37 @@ class Database:
     def list_secrets(
         self,
         limit: int = 200,
+        owner_id: Optional[int] = None,
     ) -> list[dict[str, Any]]:
+        """List secret metadata (never values).
 
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
+        owner_id=None lists everything (internal/admin use); an integer
+        restricts the result to that owner's secrets.
+        """
+
+        query = """
                 SELECT
                     id,
                     name,
                     description,
+                    owner_id,
                     created_at,
                     updated_at
                 FROM secrets
-                ORDER BY updated_at DESC
-                LIMIT ?
-                """,
-                (limit,),
+                """
+        params: list[Any] = []
+
+        if owner_id is not None:
+            query += " WHERE owner_id = ?"
+            params.append(int(owner_id))
+
+        query += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                query,
+                params,
             ).fetchall()
 
         return self._rows_to_dicts(rows)

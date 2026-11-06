@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -11,6 +12,12 @@ import httpx
 PROFILE_PREFIX = "network_profile:"
 BINDING_PREFIX = "network_binding:"
 SUPPORTED_SCHEMES = {"http", "https", "socks5"}
+
+# The bootstrap administrator owns the legacy/global profiles, which keep their
+# original storage names. Every other user's profiles live in a private
+# namespace ("network_profile:u<id>:<name>") that no other user can address.
+ADMIN_OWNER_ID = 1
+_USER_NAMESPACE = re.compile(r"^u\d+:")
 
 
 @dataclass(frozen=True)
@@ -24,6 +31,8 @@ class NetworkProfile:
 
     def validate(self) -> None:
         if not self.name or len(self.name) > 80:
+            raise ValueError("اسم ملف الشبكة غير صالح.")
+        if _USER_NAMESPACE.match(self.name):
             raise ValueError("اسم ملف الشبكة غير صالح.")
         if self.mode not in {"direct", "proxy"}:
             raise ValueError("وضع الشبكة يجب أن يكون direct أو proxy.")
@@ -70,14 +79,21 @@ class NetworkManager:
         self.security = security
 
     @staticmethod
-    def _profile_secret_name(name: str) -> str:
-        return f"{PROFILE_PREFIX}{name}"
+    def _profile_secret_name(name: str, owner_id: int = ADMIN_OWNER_ID) -> str:
+        if int(owner_id) == ADMIN_OWNER_ID:
+            return f"{PROFILE_PREFIX}{name}"
+        return f"{PROFILE_PREFIX}u{int(owner_id)}:{name}"
 
     @staticmethod
     def _binding_secret_name(project_id: int) -> str:
         return f"{BINDING_PREFIX}{project_id}"
 
-    def save_profile(self, profile: NetworkProfile) -> dict[str, Any]:
+    def _project_owner(self, project_id: int) -> Optional[int]:
+        from app.ownership import OwnershipStore
+
+        return OwnershipStore(str(self.db.database_path)).project_owner(int(project_id))
+
+    def save_profile(self, profile: NetworkProfile, owner_id: int = ADMIN_OWNER_ID) -> dict[str, Any]:
         profile.validate()
         payload = json.dumps({
             "name": profile.name,
@@ -88,31 +104,34 @@ class NetworkManager:
             "bypass": profile.bypass,
         }, ensure_ascii=False)
         encrypted = self.security.encrypt(payload)
-        secret_name = self._profile_secret_name(profile.name)
+        secret_name = self._profile_secret_name(profile.name, owner_id)
         existing = self.db.get_secret_by_name(secret_name)
         if existing:
             record = self.db.update_secret(existing["id"], encrypted_value=encrypted, description="ملف اتصال شبكة للمشاريع والمتصفح")
         else:
-            record = self.db.create_secret(name=secret_name, encrypted_value=encrypted, description="ملف اتصال شبكة للمشاريع والمتصفح")
+            record = self.db.create_secret(name=secret_name, encrypted_value=encrypted, description="ملف اتصال شبكة للمشاريع والمتصفح", owner_id=int(owner_id))
         return profile.masked() | {"id": record.get("id") if record else None}
 
-    def list_profiles(self) -> list[dict[str, Any]]:
+    def list_profiles(self, owner_id: int = ADMIN_OWNER_ID) -> list[dict[str, Any]]:
+        prefix = self._profile_secret_name("", owner_id)
         result: list[dict[str, Any]] = []
         for item in self.db.list_secrets(limit=500):
             name = str(item.get("name", ""))
-            if not name.startswith(PROFILE_PREFIX):
+            if not name.startswith(prefix):
                 continue
-            profile_name = name[len(PROFILE_PREFIX):]
+            profile_name = name[len(prefix):]
+            if int(owner_id) == ADMIN_OWNER_ID and _USER_NAMESPACE.match(profile_name):
+                continue  # another user's private profile
             try:
-                profile = self.get_profile(profile_name)
+                profile = self.get_profile(profile_name, owner_id)
                 if profile:
                     result.append(profile.masked())
             except Exception:
                 result.append({"name": profile_name, "mode": "invalid", "proxy_server": "", "username": "", "has_password": False, "bypass": ""})
         return result
 
-    def get_profile(self, name: str) -> Optional[NetworkProfile]:
-        record = self.db.get_secret_by_name(self._profile_secret_name(name))
+    def get_profile(self, name: str, owner_id: int = ADMIN_OWNER_ID) -> Optional[NetworkProfile]:
+        record = self.db.get_secret_by_name(self._profile_secret_name(name, owner_id))
         if not record:
             return None
         payload = self.security.decrypt(record["encrypted_value"])
@@ -128,8 +147,19 @@ class NetworkManager:
         profile.validate()
         return profile
 
-    def delete_profile(self, name: str) -> bool:
-        record = self.db.get_secret_by_name(self._profile_secret_name(name))
+    def get_profile_for_project(self, name: str, project_id: int) -> Optional[NetworkProfile]:
+        """Resolve a profile name inside the namespace of the project's owner.
+
+        A project can only ever use profiles owned by its own owner, so a
+        normal user can never borrow the administrator's proxy credentials.
+        """
+        owner_id = self._project_owner(project_id)
+        if owner_id is None:
+            return None
+        return self.get_profile(name, owner_id)
+
+    def delete_profile(self, name: str, owner_id: int = ADMIN_OWNER_ID) -> bool:
+        record = self.db.get_secret_by_name(self._profile_secret_name(name, owner_id))
         if not record:
             return False
         return bool(self.db.delete_secret(record["id"]))
@@ -141,7 +171,7 @@ class NetworkManager:
             if existing:
                 self.db.delete_secret(existing["id"])
             return
-        if not self.get_profile(profile_name):
+        if not self.get_profile_for_project(profile_name, project_id):
             raise ValueError("ملف الشبكة المطلوب غير موجود.")
         encrypted = self.security.encrypt(profile_name)
         if existing:
@@ -154,10 +184,10 @@ class NetworkManager:
         if not record:
             return None
         profile_name = self.security.decrypt(record["encrypted_value"])
-        return self.get_profile(profile_name)
+        return self.get_profile_for_project(profile_name, project_id)
 
-    async def test_profile(self, profile_name: str) -> dict[str, Any]:
-        profile = self.get_profile(profile_name)
+    async def test_profile(self, profile_name: str, owner_id: int = ADMIN_OWNER_ID) -> dict[str, Any]:
+        profile = self.get_profile(profile_name, owner_id)
         if not profile:
             raise ValueError("ملف الشبكة غير موجود.")
         proxy = profile.to_playwright_proxy()
@@ -175,6 +205,6 @@ class NetworkManager:
             data = response.json()
         return {"success": True, "profile": profile.masked(), "observed_public_ip": str(data.get("ip", "")), "status_code": response.status_code}
 
-    async def test_connectivity(self, profile_name: str) -> dict[str, Any]:
+    async def test_connectivity(self, profile_name: str, owner_id: int = ADMIN_OWNER_ID) -> dict[str, Any]:
         """Backward-compatible API used by the existing HTTP route."""
-        return await self.test_profile(profile_name)
+        return await self.test_profile(profile_name, owner_id)
