@@ -20,6 +20,7 @@ from app.config import settings
 from app.connectivity import ConnectivityMonitor
 from app.database import Database
 from app.notifications import NotificationManager
+from app.user_secrets import UserSecretStore
 from app.network import NetworkManager, NetworkProfile
 from app.security import SecurityManager
 from app.rate_limit import LoginRateLimiter
@@ -42,6 +43,11 @@ db = Database(settings.database_path)
 security = SecurityManager(settings)
 
 network_manager = NetworkManager(
+    database=db,
+    security=security,
+)
+
+user_secrets = UserSecretStore(
     database=db,
     security=security,
 )
@@ -1131,6 +1137,47 @@ async def bind_project_network_profile(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    return {"success": True}
+
+
+# ================================================================
+# أسرار المستخدم (معزولة لكل مستخدم)
+# ================================================================
+
+class UserSecretRequest(BaseModel):
+    value: str = Field(min_length=1, max_length=10000)
+    description: str = Field(default="", max_length=500)
+
+
+@app.get("/api/my-secrets")
+async def list_my_secrets(
+    user_id: int = Depends(_require_user_id),
+):
+    return {"secrets": user_secrets.list(user_id)}
+
+
+@app.put("/api/my-secrets/{name}")
+async def put_my_secret(
+    name: str,
+    request: UserSecretRequest,
+    user_id: int = Depends(_require_user_id),
+):
+    try:
+        saved = user_secrets.set(
+            user_id, name, request.value, request.description
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"success": True, "secret": saved}
+
+
+@app.delete("/api/my-secrets/{name}")
+async def delete_my_secret(
+    name: str,
+    user_id: int = Depends(_require_user_id),
+):
+    if not user_secrets.delete(user_id, name):
+        raise HTTPException(status_code=404, detail="السر غير موجود.")
     return {"success": True}
 
 

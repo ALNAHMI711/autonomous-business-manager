@@ -109,7 +109,7 @@ class NetworkManager:
         if existing:
             record = self.db.update_secret(existing["id"], encrypted_value=encrypted, description="ملف اتصال شبكة للمشاريع والمتصفح")
         else:
-            record = self.db.create_secret(name=secret_name, encrypted_value=encrypted, description="ملف اتصال شبكة للمشاريع والمتصفح")
+            record = self.db.create_secret(name=secret_name, encrypted_value=encrypted, description="ملف اتصال شبكة للمشاريع والمتصفح", owner_id=int(owner_id))
         return profile.masked() | {"id": record.get("id") if record else None}
 
     def list_profiles(self, owner_id: int = ADMIN_OWNER_ID) -> list[dict[str, Any]]:
